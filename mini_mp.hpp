@@ -2940,6 +2940,9 @@ inline void add_sh_ip(limbs_t&acc,const limbs_t&addend,
 
 inline constexpr std::size_t kKarRecB=24;
 
+inline std::size_t tun_kar() noexcept;
+inline void ensure_at();
+
 inline limbs_t mulkar_rc(const limbs_t&a,const limbs_t&b){
 	if(a.empty()||b.empty())
 		return {};
@@ -2986,6 +2989,49 @@ inline limbs_t mulkar_ab(const limbs_t&a,const limbs_t&b){
 	if(a.empty()||b.empty())
 		return {};
 	return mulkar_rc(a,b);
+}
+
+inline bool mulbig_ok(std::size_t an,std::size_t bn) noexcept{
+	const std::size_t nmin=std::min(an,bn);
+	const std::size_t nmax=std::max(an,bn);
+	return nmin!=0&&nmax<=nmin*4u;
+}
+
+inline void mulbig_in(const limbs_t&a,const limbs_t&b,
+									limbs_t&out){
+	if(a.empty()||b.empty()){
+		out.clear();
+		return;
+	}
+	const std::size_t nmax=std::max(a.size(),b.size());
+	if(nmax<=kCbaMax){
+		out=mulcba_ab(a,b);
+		return;
+	}
+	ensure_at();
+	const std::size_t nmin=std::min(a.size(),b.size());
+	if(nmin>=tun_kar()&&mulbig_ok(a.size(),b.size())){
+		out=mulkar_ab(a,b);
+		return;
+	}
+	mulsbk_in(a,b,out);
+}
+
+inline void sqrbig_in(const limbs_t&x,limbs_t&out){
+	if(x.empty()){
+		out.clear();
+		return;
+	}
+	if(x.size()<=kCbaMax){
+		out=sqrcba_ab(x);
+		return;
+	}
+	ensure_at();
+	if(x.size()>=tun_kar()){
+		out=mulkar_ab(x,x);
+		return;
+	}
+	out=sqrsbk_ab(x);
 }
 
 inline int cmp_u128(u128 a,u128 b) noexcept{
@@ -3086,6 +3132,71 @@ struct ModKScr{
 	limbs_t r;
 };
 
+inline std::pair<std::uint64_t,limbs_t> dvm1q_absl(const limbs_t&u,
+														 const limbs_t&v){
+	MINI_MP_ASSERT(!v.empty());
+	MINI_MP_ASSERT(u.size()==v.size());
+	MINI_MP_ASSERT(cmp_abs(u,v)>=0);
+	if(u.size()==1){
+		const std::uint64_t q=u[0]/v[0];
+		const std::uint64_t r=u[0]%v[0];
+		limbs_t rem;
+		if(r!=0)
+			rem.push_back(r);
+		return {q,std::move(rem)};
+	}
+
+	const std::size_t n=v.size();
+	const unsigned s=std::countl_zero(v.back());
+	limbs_t vn;
+	limbs_t un;
+	shl_into(vn,v,s);
+	shl_into(un,u,s);
+	if(vn.size()<n)
+		vn.resize(n,0);
+	if(un.size()<n+1)
+		un.resize(n+1,0);
+
+	std::uint64_t qhat=0;
+	std::uint64_t rhat=0;
+	std::uint64_t rhat_ovf=0;
+	if(un[n]==vn[n-1]){
+		qhat=std::numeric_limits<std::uint64_t>::max();
+		rhat_ovf=addc_u64(0,un[n-1],vn[n-1],&rhat);
+	}else{
+		qhat=udiv128(un[n],un[n-1],vn[n-1],&rhat);
+	}
+
+	while(rhat_ovf==0){
+		const u128 lhs=mul_u64(qhat,vn[n-2]);
+		const u128 rhs{un[n-2],rhat};
+		if(cmp_u128(lhs,rhs)<=0)
+			break;
+		--qhat;
+		rhat_ovf=addc_u64(0,rhat,vn[n-1],&rhat);
+	}
+
+	const std::uint64_t cy=mpn_sbm1(un.data(),vn.data(),n,qhat);
+	std::uint64_t top=0;
+	const std::uint64_t borrow=subb_u64(0,un[n],cy,&top);
+	un[n]=top;
+	if(borrow!=0){
+		--qhat;
+		const std::uint64_t carry=mpn_add_n(un.data(),un.data(),vn.data(),n);
+		std::uint64_t out=0;
+		const std::uint64_t ctop=addc_u64(0,un[n],carry,&out);
+		MINI_MP_ASSERT(ctop==0);
+		un[n]=out;
+	}
+
+	limbs_t r(un.begin(),un.begin()+static_cast<std::ptrdiff_t>(n));
+	if(s!=0)
+		shr_ip(r,s);
+	else
+		trim_lz(r);
+	return {qhat,std::move(r)};
+}
+
 inline std::pair<limbs_t,limbs_t> dvmk_absl(const limbs_t&u,
 														 const limbs_t&v){
 	MINI_MP_ASSERT(!v.empty());
@@ -3105,6 +3216,13 @@ inline std::pair<limbs_t,limbs_t> dvmk_absl(const limbs_t&u,
 		if(rem!=0)
 			r.push_back(rem);
 		return {std::move(q),std::move(r)};
+	}
+	if(u.size()==v.size()){
+		auto qr=dvm1q_absl(u,v);
+		limbs_t q;
+		if(qr.first!=0)
+			q.push_back(qr.first);
+		return {std::move(q),std::move(qr.second)};
 	}
 
 	const std::size_t n=v.size();
@@ -3313,6 +3431,9 @@ inline limbs_t modk_absl(const limbs_t&u,const limbs_t&v){
 			r.push_back(rem);
 		return r;
 	}
+	if(u.size()==v.size()){
+		return dvm1q_absl(u,v).second;
+	}
 
 	limbs_t r=u;
 	ModKScr sc;
@@ -3421,7 +3542,10 @@ inline void mont_red(limbs_t&t,MontCtx&ctx,limbs_t&out){
 
 inline void mont_mul(const limbs_t&a_bar,const limbs_t&b_bar,
 						   MontCtx&ctx,limbs_t&out){
-	mulsbk_in(a_bar,b_bar,ctx.t);
+	if(&a_bar==&b_bar)
+		sqrbig_in(a_bar,ctx.t);
+	else
+		mulbig_in(a_bar,b_bar,ctx.t);
 	if(ctx.t.size()<2*ctx.k+3)
 		ctx.t.resize(2*ctx.k+3,0);
 	mont_red(ctx.t,ctx,ctx.tmp);
@@ -3484,11 +3608,11 @@ inline void bar_redip(limbs_t&x,BarModCtx&ctx){
 	MINI_MP_ASSERT(k>=2);
 
 	cpyhi_in(x,k-1,ctx.q1);
-	mulsbk_in(ctx.q1,ctx.mu,ctx.q2);
+	mulbig_in(ctx.q1,ctx.mu,ctx.q2);
 	cpyhi_in(ctx.q2,k+1,ctx.q3);
 
 	cpylo_in(x,k+1,ctx.r1);
-	mulsbk_in(ctx.q3,ctx.mod,ctx.prod);
+	mulbig_in(ctx.q3,ctx.mod,ctx.prod);
 	cpylo_in(ctx.prod,k+1,ctx.r2);
 
 	if(cmp_abs(ctx.r1,ctx.r2)>=0){
@@ -3507,7 +3631,10 @@ inline void bar_redip(limbs_t&x,BarModCtx&ctx){
 
 inline void bar_mulm(const limbs_t&a,const limbs_t&b,BarModCtx&ctx,
 							limbs_t&out){
-	mulsbk_in(a,b,out);
+	if(&a==&b)
+		sqrbig_in(a,out);
+	else
+		mulbig_in(a,b,out);
 	bar_redip(out,ctx);
 }
 
@@ -3522,7 +3649,10 @@ inline void mulmod_ip(limbs_t&acc,const limbs_t&x,const limbs_t&mod,
 		acc.clear();
 		return;
 	}
-	mulsbk_in(acc,x,sc.t);
+	if(&acc==&x)
+		sqrbig_in(acc,sc.t);
+	else
+		mulbig_in(acc,x,sc.t);
 	modk_ip(sc.t,mod,sc.mod_sc);
 	acc.swap(sc.t);
 }
@@ -3530,7 +3660,7 @@ inline void mulmod_ip(limbs_t&acc,const limbs_t&x,const limbs_t&mod,
 inline void sqrmod_ip(limbs_t&x,const limbs_t&mod,MulModScr&sc){
 	if(x.empty())
 		return;
-	mulsbk_in(x,x,sc.t);
+	sqrbig_in(x,sc.t);
 	modk_ip(sc.t,mod,sc.mod_sc);
 	x.swap(sc.t);
 }
@@ -3588,6 +3718,13 @@ inline limbs_t divk_absl(const limbs_t&u,const limbs_t&v){
 			q[i-1]=udiv128(rem,q[i-1],v[0],&rem);
 		}
 		trim_lz(q);
+		return q;
+	}
+	if(u.size()==v.size()){
+		auto qr=dvm1q_absl(u,v);
+		limbs_t q;
+		if(qr.first!=0)
+			q.push_back(qr.first);
 		return q;
 	}
 
@@ -6214,7 +6351,7 @@ inline BigInt modpow(BigInt base,BigInt exp,const BigInt&mod){
 			return BigInt::from_u64(r);
 		}
 
-		if((mod.limbs_[0]&1u)!=0u&&mod.limbs_.size()<=8){
+		if((mod.limbs_[0]&1u)!=0u){
 			detail::MontCtx ctx=detail::mk_mctx(mod.limbs_);
 			detail::limbs_t one{1};
 			detail::limbs_t base_bar;
@@ -6318,7 +6455,7 @@ inline BigInt modpow(BigInt base,BigInt exp,const BigInt&mod){
 		return BigInt::from_u64(r);
 	}
 
-	if((mod.limbs_[0]&1u)!=0u&&mod.limbs_.size()<=8){
+	if((mod.limbs_[0]&1u)!=0u){
 		detail::MontCtx ctx=detail::mk_mctx(mod.limbs_);
 		detail::limbs_t one{1};
 		detail::limbs_t base_bar;
