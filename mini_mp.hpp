@@ -93,6 +93,10 @@ Optional knobs:
 #define MINI_MP_ENABLE_AUTOTUNE 1
 #endif
 
+#ifndef MINI_MP_ENABLE_SIMD
+#define MINI_MP_ENABLE_SIMD 0
+#endif
+
 #ifndef MINI_MP_INLINE_LIMBS
 #define MINI_MP_INLINE_LIMBS 8
 #endif
@@ -192,19 +196,19 @@ inline constexpr vid kId=vid::other;
 #define MINI_MP_VEC_X86 0
 #endif
 
-#if defined(__AVX512F)
+#if MINI_MP_ENABLE_SIMD&&defined(__AVX512F)
 #define MINI_MP_VEC_W8 1
 #else
 #define MINI_MP_VEC_W8 0
 #endif
 
-#if !MINI_MP_VEC_W8&&defined(__AVX2__)
+#if MINI_MP_ENABLE_SIMD&&!MINI_MP_VEC_W8&&defined(__AVX2__)
 #define MINI_MP_VEC_W4 1
 #else
 #define MINI_MP_VEC_W4 0
 #endif
 
-#if !MINI_MP_VEC_W8&&!MINI_MP_VEC_W4&&                                      \
+#if MINI_MP_ENABLE_SIMD&&!MINI_MP_VEC_W8&&!MINI_MP_VEC_W4&&                 \
 	(defined(__SSE2__)||defined(_M_X64)||defined(_M_IX86_FP)||              \
 	 defined(__ARM_NEON)||defined(__ARM_NEON__)||defined(__aarch64__)||     \
 	 defined(__riscv_vector)||defined(__ALTIVEC__)||defined(__VSX__)||      \
@@ -775,6 +779,14 @@ inline std::uint64_t subb_u64(std::uint64_t borrow_in,std::uint64_t a,
 										 static_cast<unsigned __int64>(b),&tmp);
 	*out=static_cast<std::uint64_t>(tmp);
 	return static_cast<std::uint64_t>(c);
+#elif MINI_MP_DETAIL_USE_GNU_X86_ADDCARRY
+	unsigned long long tmp=0;
+	const unsigned char c=_subborrow_u64(
+		static_cast<unsigned char>(borrow_in),
+		static_cast<unsigned long long>(a),
+		static_cast<unsigned long long>(b),&tmp);
+	*out=static_cast<std::uint64_t>(tmp);
+	return static_cast<std::uint64_t>(c);
 #else
 	const unsigned __int128 aa=static_cast<unsigned __int128>(a);
 	const unsigned __int128 bb=static_cast<unsigned __int128>(b)+
@@ -952,7 +964,7 @@ template<class T,std::size_t InlineN> class SmallLimbs{
 		: SmallLimbs(init.begin(),init.end()){}
 
 	SmallLimbs(const SmallLimbs&other) : SmallLimbs(){
-		assign(other.begin(),other.end());
+		assign(other);
 	}
 
 	SmallLimbs(SmallLimbs&&other) noexcept : SmallLimbs(){
@@ -963,7 +975,7 @@ template<class T,std::size_t InlineN> class SmallLimbs{
 
 	SmallLimbs&operator=(const SmallLimbs&other){
 		if(this!=&other){
-			assign(other.begin(),other.end());
+			assign(other);
 		}
 		return *this;
 	}
@@ -1029,6 +1041,13 @@ template<class T,std::size_t InlineN> class SmallLimbs{
 		size_=n;
 	}
 
+	void resize_uninit(size_type n){
+		static_assert(std::is_trivially_copyable_v<T>,
+					  "resize_uninit requires trivially copyable limbs");
+		reserve(n);
+		size_=n;
+	}
+
 	void push_back(const T&v){
 		reserve(size_+1);
 		ptr_[size_]=v;
@@ -1058,11 +1077,24 @@ template<class T,std::size_t InlineN> class SmallLimbs{
 	template<class It,
 			 class=std::enable_if_t<!std::is_integral_v<std::decay_t<It>>>>
 	void assign(It first,It last){
-		SmallLimbs tmp;
-		for(It it=first;it!=last;++it){
-			tmp.push_back(*it);
+		using cat=typename std::iterator_traits<It>::iterator_category;
+		if constexpr(std::is_base_of_v<std::random_access_iterator_tag,cat>){
+			const auto diff=last-first;
+			MINI_MP_ASSERT(diff>=0);
+			const size_type n=static_cast<size_type>(diff);
+			clear();
+			reserve(n);
+			for(size_type i=0;i<n;++i){
+				ptr_[i]=first[static_cast<typename std::iterator_traits<It>::difference_type>(i)];
+			}
+			size_=n;
+		}else{
+			SmallLimbs tmp;
+			for(It it=first;it!=last;++it){
+				tmp.push_back(*it);
+			}
+			swap(tmp);
 		}
-		swap(tmp);
 	}
 
 	void assign(std::initializer_list<T> init){
@@ -1152,12 +1184,33 @@ template<class T,std::size_t InlineN> class SmallLimbs{
 
 	void grow_to(size_type new_cap){
 		T*new_ptr=new T[new_cap];
-		for(size_type i=0;i<size_;++i){
-			new_ptr[i]=ptr_[i];
+		if constexpr(std::is_trivially_copyable_v<T>){
+			if(size_!=0){
+				std::memcpy(new_ptr,ptr_,size_*sizeof(T));
+			}
+		}else{
+			for(size_type i=0;i<size_;++i){
+				new_ptr[i]=ptr_[i];
+			}
 		}
 		rel_heap();
 		ptr_=new_ptr;
 		cap_=new_cap;
+	}
+
+	void assign(const SmallLimbs&other){
+		clear();
+		reserve(other.size_);
+		if constexpr(std::is_trivially_copyable_v<T>){
+			if(other.size_!=0){
+				std::memcpy(ptr_,other.ptr_,other.size_*sizeof(T));
+			}
+		}else{
+			for(size_type i=0;i<other.size_;++i){
+				ptr_[i]=other.ptr_[i];
+			}
+		}
+		size_=other.size_;
 	}
 
 	void move_from(SmallLimbs&&other) noexcept{
@@ -1377,24 +1430,58 @@ inline std::uint64_t mpn_sub_1(std::uint64_t*rp,const std::uint64_t*ap,
 							   std::size_t n,std::uint64_t b){
 	if(n==0)
 		return (b!=0)?1u:0u;
+	if(b==0){
+		if(rp!=ap){
+			std::memcpy(rp,ap,n*sizeof(std::uint64_t));
+		}
+		return 0;
+	}
 #if MINI_MP_DETAIL_USE_MSVC_INTRIN||MINI_MP_DETAIL_USE_GNU_X86_ADDCARRY
 	unsigned long long out=0;
 	unsigned char c=_subborrow_u64(0,static_cast<unsigned long long>(ap[0]),
 								   static_cast<unsigned long long>(b),&out);
 	rp[0]=static_cast<std::uint64_t>(out);
+	if(c==0){
+		if(rp!=ap&&n>1){
+			std::memcpy(rp+1,ap+1,(n-1)*sizeof(std::uint64_t));
+		}
+		return 0;
+	}
 	for(std::size_t i=1;i<n;++i){
 		c=_subborrow_u64(c,static_cast<unsigned long long>(ap[i]),0,&out);
 		rp[i]=static_cast<std::uint64_t>(out);
+		if(c==0){
+			if(rp!=ap&&i+1<n){
+				std::memcpy(rp+static_cast<std::ptrdiff_t>(i+1),
+							ap+static_cast<std::ptrdiff_t>(i+1),
+							(n-(i+1))*sizeof(std::uint64_t));
+			}
+			return 0;
+		}
 	}
 	return static_cast<std::uint64_t>(c);
 #else
 	std::uint64_t r=ap[0]-b;
 	rp[0]=r;
 	std::uint64_t borrow=(ap[0]<b)?1u:0u;
+	if(borrow==0){
+		if(rp!=ap&&n>1){
+			std::memcpy(rp+1,ap+1,(n-1)*sizeof(std::uint64_t));
+		}
+		return 0;
+	}
 	for(std::size_t i=1;i<n;++i){
 		const std::uint64_t t=ap[i]-borrow;
 		rp[i]=t;
 		borrow=(ap[i]<borrow)?1u:0u;
+		if(borrow==0){
+			if(rp!=ap&&i+1<n){
+				std::memcpy(rp+static_cast<std::ptrdiff_t>(i+1),
+							ap+static_cast<std::ptrdiff_t>(i+1),
+							(n-(i+1))*sizeof(std::uint64_t));
+			}
+			return 0;
+		}
 	}
 	return borrow;
 #endif
@@ -1415,10 +1502,14 @@ inline std::uint64_t mpn_sub(std::uint64_t*rp,const std::uint64_t*ap,
 							 std::size_t an,const std::uint64_t*bp,
 							 std::size_t bn){
 	MINI_MP_ASSERT(an>=bn);
-	std::uint64_t borrow=0;
-	if(bn!=0){
-		borrow=mpn_sub_n(rp,ap,bp,bn);
+	if(bn==0){
+		if(rp!=ap&&an!=0){
+			std::memcpy(rp,ap,an*sizeof(std::uint64_t));
+		}
+		return 0;
 	}
+	std::uint64_t borrow=0;
+	borrow=mpn_sub_n(rp,ap,bp,bn);
 	if(an==bn)
 		return borrow;
 	borrow=mpn_sub_1(rp+static_cast<std::ptrdiff_t>(bn),
@@ -1548,7 +1639,7 @@ inline void add_abs_to(limbs_t&out,const limbs_t&a,const limbs_t&b){
 	}
 	const std::size_t an=ap->size();
 	const std::size_t bn=bp->size();
-	out.resize(an+1,0);
+	out.resize_uninit(an+1);
 	const std::uint64_t carry=
 		(an==bn)?mpn_add_n(out.data(),ap->data(),bp->data(),an)
 				:mpn_add(out.data(),ap->data(),an,bp->data(),bn);
@@ -1563,7 +1654,7 @@ inline void sub_abs_to(limbs_t&out,const limbs_t&a,const limbs_t&b){
 		out=a;
 		return;
 	}
-	out.resize(a.size(),0);
+	out.resize_uninit(a.size());
 	const std::uint64_t borrow=
 		mpn_sub(out.data(),a.data(),a.size(),b.data(),b.size());
 	MINI_MP_ASSERT(borrow==0);
@@ -1637,6 +1728,180 @@ inline void sub_abs_ip(limbs_t&a,const limbs_t&b){
 	a.resize(mpn_nsize(a.data(),a.size()));
 }
 
+inline void add_one_ip(limbs_t&x){
+	if(x.empty()){
+		x.push_back(1);
+		return;
+	}
+	x.reserve(x.size()+1);
+	const std::uint64_t carry=mpn_add_1(x.data(),x.data(),x.size(),1);
+	if(carry!=0)
+		x.push_back(carry);
+}
+
+inline limbs_t sub_one(limbs_t x){
+	MINI_MP_ASSERT(!x.empty());
+	const std::uint64_t borrow=mpn_sub_1(x.data(),x.data(),x.size(),1);
+	MINI_MP_ASSERT(borrow==0);
+	trim_lz(x);
+	return x;
+}
+
+inline limbs_t bit_and_abs(const limbs_t&a,const limbs_t&b){
+	const std::size_t n=std::min(a.size(),b.size());
+	limbs_t out;
+	if(n==0)
+		return out;
+	out.resize_uninit(n);
+	vecab::and_n(out.data(),a.data(),b.data(),n);
+	trim_lz(out);
+	return out;
+}
+
+inline limbs_t bit_or_abs(const limbs_t&a,const limbs_t&b){
+	if(a.empty())
+		return b;
+	if(b.empty())
+		return a;
+	const limbs_t*ap=&a;
+	const limbs_t*bp=&b;
+	if(ap->size()<bp->size())
+		std::swap(ap,bp);
+	const std::size_t an=ap->size();
+	const std::size_t bn=bp->size();
+	limbs_t out;
+	out.resize_uninit(an);
+	vecab::or_n(out.data(),ap->data(),bp->data(),bn);
+	if(an>bn){
+		std::memcpy(out.data()+static_cast<std::ptrdiff_t>(bn),
+					ap->data()+static_cast<std::ptrdiff_t>(bn),
+					(an-bn)*sizeof(limb_t));
+	}
+	return out;
+}
+
+inline limbs_t bit_xor_abs(const limbs_t&a,const limbs_t&b){
+	if(a.empty())
+		return b;
+	if(b.empty())
+		return a;
+	const limbs_t*ap=&a;
+	const limbs_t*bp=&b;
+	if(ap->size()<bp->size())
+		std::swap(ap,bp);
+	const std::size_t an=ap->size();
+	const std::size_t bn=bp->size();
+	limbs_t out;
+	out.resize_uninit(an);
+	vecab::xor_n(out.data(),ap->data(),bp->data(),bn);
+	if(an>bn){
+		std::memcpy(out.data()+static_cast<std::ptrdiff_t>(bn),
+					ap->data()+static_cast<std::ptrdiff_t>(bn),
+					(an-bn)*sizeof(limb_t));
+	}
+	trim_lz(out);
+	return out;
+}
+
+inline limbs_t bit_andnot_abs(const limbs_t&a,const limbs_t&mask){
+	limbs_t out;
+	if(a.empty())
+		return out;
+	out.resize_uninit(a.size());
+	const std::size_t mn=mask.size();
+	std::size_t i=0;
+	for(;i<a.size()&&i<mn;++i)
+		out[i]=a[i]&~mask[i];
+	for(;i<a.size();++i)
+		out[i]=a[i];
+	trim_lz(out);
+	return out;
+}
+
+inline limbs_t bit_notand_abs(const limbs_t&a,const limbs_t&mask){
+	limbs_t out;
+	if(mask.empty())
+		return out;
+	out.resize_uninit(mask.size());
+	const std::size_t an=a.size();
+	std::size_t i=0;
+	for(;i<mask.size()&&i<an;++i)
+		out[i]=(~a[i])&mask[i];
+	for(;i<mask.size();++i)
+		out[i]=mask[i];
+	trim_lz(out);
+	return out;
+}
+
+inline limbs_t bit_and_pn_abs(const limbs_t&a,const limbs_t&b){
+	limbs_t out;
+	if(a.empty())
+		return out;
+	out.resize_uninit(a.size());
+	std::uint64_t borrow=1;
+	for(std::size_t i=0;i<a.size();++i){
+		std::uint64_t mask=0;
+		if(i<b.size()){
+			const std::uint64_t bi=b[i];
+			mask=bi-borrow;
+			borrow=(bi<borrow)?1u:0u;
+		}else{
+			borrow=0;
+		}
+		out[i]=a[i]&~mask;
+	}
+	trim_lz(out);
+	return out;
+}
+
+inline limbs_t bit_or_pn_mag(const limbs_t&a,const limbs_t&b){
+	limbs_t out;
+	out.resize_uninit(b.size());
+	std::uint64_t borrow=1;
+	std::uint64_t carry=1;
+	for(std::size_t i=0;i<b.size();++i){
+		const std::uint64_t bi=b[i];
+		const std::uint64_t mask=bi-borrow;
+		borrow=(bi<borrow)?1u:0u;
+		const std::uint64_t av=(i<a.size())?a[i]:0u;
+		const std::uint64_t v=(~av)&mask;
+		const std::uint64_t sum=v+carry;
+		carry=(sum<carry)?1u:0u;
+		out[i]=sum;
+	}
+	if(carry!=0)
+		out.push_back(carry);
+	trim_lz(out);
+	return out;
+}
+
+inline limbs_t bit_xor_pn_mag(const limbs_t&a,const limbs_t&b){
+	const std::size_t n=std::max(a.size(),b.size());
+	limbs_t out;
+	out.resize_uninit(n);
+	std::uint64_t borrow=1;
+	std::uint64_t carry=1;
+	for(std::size_t i=0;i<n;++i){
+		std::uint64_t mask=0;
+		if(i<b.size()){
+			const std::uint64_t bi=b[i];
+			mask=bi-borrow;
+			borrow=(bi<borrow)?1u:0u;
+		}else{
+			borrow=0;
+		}
+		const std::uint64_t av=(i<a.size())?a[i]:0u;
+		const std::uint64_t v=av^mask;
+		const std::uint64_t sum=v+carry;
+		carry=(sum<carry)?1u:0u;
+		out[i]=sum;
+	}
+	if(carry!=0)
+		out.push_back(carry);
+	trim_lz(out);
+	return out;
+}
+
 inline void twos_neg(limbs_t&x){
 	for(auto&v : x)
 		v=~v;
@@ -1685,7 +1950,7 @@ inline void shl_into(limbs_t&out,const limbs_t&x,unsigned s){
 	}
 	if(s==0u){
 		if(&out!=&x){
-			out.resize(x.size());
+			out.resize_uninit(x.size());
 			std::memcpy(out.data(),x.data(),x.size()*sizeof(limb_t));
 		}
 		return;
@@ -1693,7 +1958,7 @@ inline void shl_into(limbs_t&out,const limbs_t&x,unsigned s){
 
 	if(&out==&x){
 		const std::size_t old_size=out.size();
-		out.resize(old_size+1,0);
+		out.resize_uninit(old_size+1);
 		std::uint64_t carry=0;
 		for(std::size_t i=0;i<old_size;++i){
 			const std::uint64_t cur=out[i];
@@ -1705,7 +1970,7 @@ inline void shl_into(limbs_t&out,const limbs_t&x,unsigned s){
 		return;
 	}
 
-	out.resize(x.size()+1,0);
+	out.resize_uninit(x.size()+1);
 	std::uint64_t carry=0;
 	for(std::size_t i=0;i<x.size();++i){
 		const std::uint64_t cur=x[i];
@@ -1734,7 +1999,7 @@ inline void shl_into(limbs_t&out,const limbs_t&x,std::size_t shift_bits){
 	const std::size_t limb_shift=shift_bits/64;
 	const unsigned bit_shift=static_cast<unsigned>(shift_bits%64);
 	const std::size_t out_size=x.size()+limb_shift+(bit_shift?1:0);
-	out.resize(out_size,0);
+	out.resize_uninit(out_size);
 
 	for(std::size_t i=0;i<limb_shift;++i){
 		out[i]=0;
@@ -1754,6 +2019,34 @@ inline void shl_into(limbs_t&out,const limbs_t&x,std::size_t shift_bits){
 		out[x.size()+limb_shift]=carry;
 	}
 	trim_lz(out);
+}
+
+inline void shl_ip(limbs_t&x,std::size_t shift_bits){
+	if(x.empty()||shift_bits==0)
+		return;
+	const std::size_t limb_shift=shift_bits/64;
+	const unsigned bit_shift=static_cast<unsigned>(shift_bits%64);
+	const std::size_t old_size=x.size();
+	const std::size_t new_size=old_size+limb_shift+(bit_shift?1u:0u);
+	x.resize_uninit(new_size);
+	if(limb_shift!=0){
+		std::memmove(x.data()+static_cast<std::ptrdiff_t>(limb_shift),
+					 x.data(),old_size*sizeof(limb_t));
+		std::memset(x.data(),0,limb_shift*sizeof(limb_t));
+	}
+	if(bit_shift==0)
+		return;
+
+	std::uint64_t carry=0;
+	const std::size_t begin=limb_shift;
+	const std::size_t end=limb_shift+old_size;
+	for(std::size_t i=begin;i<end;++i){
+		const std::uint64_t cur=x[i];
+		x[i]=(cur<<bit_shift)|carry;
+		carry=cur>>(64u-bit_shift);
+	}
+	x[end]=carry;
+	trim_lz(x);
 }
 
 inline limbs_t shl_bits(const limbs_t&x,std::size_t shift_bits){
@@ -1808,9 +2101,65 @@ inline void shr_ip(limbs_t&x,std::size_t shift_bits){
 	trim_lz(x);
 }
 
+inline void shr_into(limbs_t&out,const limbs_t&x,std::size_t shift_bits){
+	if(x.empty()){
+		out.clear();
+		return;
+	}
+	if(shift_bits==0){
+		if(&out!=&x){
+			out.resize_uninit(x.size());
+			std::memcpy(out.data(),x.data(),x.size()*sizeof(limb_t));
+		}
+		return;
+	}
+	if(&out==&x){
+		shr_ip(out,shift_bits);
+		return;
+	}
+	if(shift_bits<64){
+		const unsigned s=static_cast<unsigned>(shift_bits);
+		const unsigned lshift=64u-s;
+		out.resize_uninit(x.size());
+		std::size_t i=0;
+		for(;i+1u<x.size();++i){
+			out[i]=(x[i]>>s)|(x[i+1u]<<lshift);
+		}
+		out[i]=x[i]>>s;
+		trim_lz(out);
+		return;
+	}
+	const std::size_t limb_shift=shift_bits/64;
+	const unsigned bit_shift=static_cast<unsigned>(shift_bits%64);
+	if(limb_shift>=x.size()){
+		out.clear();
+		return;
+	}
+
+	const std::size_t out_size=x.size()-limb_shift;
+	out.resize_uninit(out_size);
+	if(bit_shift==0){
+		std::memcpy(out.data(),
+					x.data()+static_cast<std::ptrdiff_t>(limb_shift),
+					out_size*sizeof(limb_t));
+		trim_lz(out);
+		return;
+	}
+
+	const unsigned rshift=64u-bit_shift;
+	for(std::size_t i=0;i<out_size;++i){
+		const std::size_t src=i+limb_shift;
+		const std::uint64_t lo=x[src]>>bit_shift;
+		const std::uint64_t hi=
+			(src+1u<x.size())?(x[src+1u]<<rshift):0u;
+		out[i]=lo|hi;
+	}
+	trim_lz(out);
+}
+
 inline limbs_t shr_bits(const limbs_t&x,std::size_t shift_bits){
-	limbs_t out=x;
-	shr_ip(out,shift_bits);
+	limbs_t out;
+	shr_into(out,x,shift_bits);
 	return out;
 }
 
@@ -1890,7 +2239,8 @@ inline limbs_t div_limb(const limbs_t&x,std::uint64_t d,std::uint64_t*rem_out){
 		}
 		return limbs_t{q0,q1};
 	}
-	limbs_t q(x.size(),0);
+	limbs_t q;
+	q.resize_uninit(x.size());
 	std::uint64_t rem=0;
 	for(std::size_t i=x.size();i>0;--i){
 		q[i-1]=udiv128(rem,x[i-1],d,&rem);
@@ -1898,6 +2248,43 @@ inline limbs_t div_limb(const limbs_t&x,std::uint64_t d,std::uint64_t*rem_out){
 	trim_lz(q);
 	*rem_out=rem;
 	return q;
+}
+
+inline std::uint64_t div_limb_ip(limbs_t&x,std::uint64_t d){
+	MINI_MP_ASSERT(d!=0);
+	if(x.empty())
+		return 0;
+	if(d==1)
+		return 0;
+	if(x.size()==1){
+		const std::uint64_t v=x[0];
+		const std::uint64_t q=v/d;
+		const std::uint64_t rem=v%d;
+		if(q==0)
+			x.clear();
+		else
+			x[0]=q;
+		return rem;
+	}
+	if(x.size()==2){
+		const std::uint64_t q1=x[1]/d;
+		std::uint64_t rem1=x[1]%d;
+		std::uint64_t rem=0;
+		const std::uint64_t q0=udiv128(rem1,x[0],d,&rem);
+		x[0]=q0;
+		if(q1==0){
+			x.resize(q0==0?0u:1u);
+		}else{
+			x[1]=q1;
+		}
+		return rem;
+	}
+	std::uint64_t rem=0;
+	for(std::size_t i=x.size();i>0;--i){
+		x[i-1]=udiv128(rem,x[i-1],d,&rem);
+	}
+	trim_lz(x);
+	return rem;
 }
 
 inline std::uint64_t mod_limb(const limbs_t&x,std::uint64_t d){
@@ -1950,6 +2337,17 @@ inline std::pair<std::uint32_t,std::size_t> chunk_par(std::uint32_t base){
 
 inline int ch_to_dig(char c) noexcept;
 inline char dig_to_ch(unsigned d) noexcept;
+
+inline int hex_to_dig(char c) noexcept{
+	const unsigned uc=static_cast<unsigned char>(c);
+	unsigned v=uc-static_cast<unsigned>('0');
+	if(v<10u)
+		return static_cast<int>(v);
+	v=(uc|0x20u)-static_cast<unsigned>('a');
+	if(v<6u)
+		return static_cast<int>(v+10u);
+	return -1;
+}
 
 inline bool ispow2_32(std::uint32_t x) noexcept{
 	return x!=0u&&(x&(x-1u))==0u;
@@ -2095,7 +2493,47 @@ inline bool prs_p2dl(std::string_view digits,int base,
 	const std::uint32_t ub=static_cast<std::uint32_t>(base);
 	if(!ispow2_32(ub)||ub<2u||ub>32u)
 		return false;
+	if(base==16){
+		const std::size_t limb_count=(digits.size()+15u)/16u;
+		out->resize_uninit(limb_count);
+		std::size_t limb_index=0;
+		for(std::size_t end=digits.size();end>0;){
+			const std::size_t begin=(end>16u)?(end-16u):0u;
+			std::uint64_t limb=0;
+			for(std::size_t i=begin;i<end;++i){
+				const int d=hex_to_dig(digits[i]);
+				if(d<0)
+					return false;
+				limb=(limb<<4u)|static_cast<std::uint64_t>(d);
+			}
+			(*out)[limb_index++]=limb;
+			end=begin;
+		}
+		out->resize(limb_index);
+		trim_lz(*out);
+		return true;
+	}
 	const unsigned bit_dig=log2p2_32(ub);
+	out->reserve((digits.size()*bit_dig+63u)/64u);
+
+	if((64u%bit_dig)==0u){
+		const std::size_t digs_per_limb=64u/bit_dig;
+		for(std::size_t end=digits.size();end>0;){
+			const std::size_t begin=
+				(end>digs_per_limb)?(end-digs_per_limb):0;
+			std::uint64_t limb=0;
+			for(std::size_t i=begin;i<end;++i){
+				const int d=ch_to_dig(digits[i]);
+				if(d<0||d>=base)
+					return false;
+				limb=(limb<<bit_dig)|static_cast<std::uint64_t>(d);
+			}
+			out->push_back(limb);
+			end=begin;
+		}
+		trim_lz(*out);
+		return true;
+	}
 
 	std::uint64_t cur=0;
 	unsigned cur_bits=0;
@@ -2135,6 +2573,72 @@ inline std::string to_str_p2(const limbs_t&x,int sign,int base){
 		return "0";
 	const unsigned bit_dig=
 		log2p2_32(static_cast<std::uint32_t>(base));
+	if(base==16){
+		static constexpr char kHex[]="0123456789abcdef";
+		std::string out;
+		out.reserve(x.size()*16u+((sign<0)?1u:0u));
+		if(sign<0)
+			out.push_back('-');
+
+		const std::uint64_t hi=x.back();
+		const unsigned hi_bits=64u-std::countl_zero(hi);
+		const std::size_t hi_digits=(hi_bits+3u)/4u;
+		for(std::size_t k=hi_digits;k>0;--k){
+			const unsigned shift=static_cast<unsigned>((k-1u)*4u);
+			out.push_back(kHex[(hi>>shift)&0x0fU]);
+		}
+
+		for(std::size_t limb_i=x.size()-1;limb_i>0;--limb_i){
+			const std::uint64_t limb=x[limb_i-1];
+			char buf[16];
+			for(std::size_t k=0;k<16u;++k){
+				const unsigned shift=static_cast<unsigned>((15u-k)*4u);
+				buf[k]=kHex[(limb>>shift)&0x0fU];
+			}
+			out.append(buf,buf+16);
+		}
+		return out;
+	}
+	if((64u%bit_dig)==0u){
+		const std::size_t digs_per_limb=64u/bit_dig;
+		const std::uint64_t mask=(bit_dig==64u)
+			?~std::uint64_t(0)
+			:((std::uint64_t(1)<<bit_dig)-1u);
+		std::string out;
+		out.reserve(x.size()*digs_per_limb+((sign<0)?1u:0u));
+		if(sign<0)
+			out.push_back('-');
+
+		std::uint64_t hi=x.back();
+		bool started=false;
+		for(std::size_t p=digs_per_limb;p>0;--p){
+			const unsigned shift=
+				static_cast<unsigned>((p-1u)*bit_dig);
+			const std::uint32_t d=
+				static_cast<std::uint32_t>((hi>>shift)&mask);
+			if(!started&&d==0u)
+				continue;
+			started=true;
+			out.push_back(dig_to_ch(d));
+		}
+		if(!started)
+			out.push_back('0');
+
+		for(std::size_t limb_i=x.size()-1;limb_i>0;--limb_i){
+			const std::uint64_t limb=x[limb_i-1];
+			char buf[32];
+			MINI_MP_ASSERT(digs_per_limb<=sizeof(buf));
+			for(std::size_t k=0;k<digs_per_limb;++k){
+				const unsigned shift=static_cast<unsigned>(
+					(digs_per_limb-1u-k)*bit_dig);
+				const std::uint32_t d=
+					static_cast<std::uint32_t>((limb>>shift)&mask);
+				buf[k]=dig_to_ch(d);
+			}
+			out.append(buf,buf+digs_per_limb);
+		}
+		return out;
+	}
 	const std::size_t bits=bit_length(x);
 	const std::size_t ndigits=(bits+bit_dig-1u)/bit_dig;
 
@@ -2503,7 +3007,7 @@ inline void mulbl_in(const limbs_t&a,std::uint64_t m,limbs_t&out){
 	}
 
 	const std::size_t n=a.size();
-	out.resize(n+1,0);
+	out.resize_uninit(n+1);
 	out[n]=mpn_mul_1(out.data(),a.data(),n,m);
 	out.resize(mpn_nsize(out.data(),n+1));
 }
@@ -3651,7 +4155,7 @@ class BigInt{
 			return *this;
 		}
 		if(cmp>0){
-			limbs_=detail::sub_abs(limbs_,rhs.limbs_);
+			detail::sub_abs_ip(limbs_,rhs.limbs_);
 		}else{
 			limbs_=detail::sub_abs(rhs.limbs_,limbs_);
 			sign_=rhs.sign_;
@@ -3663,10 +4167,33 @@ class BigInt{
 	BigInt&operator-=(const BigInt&rhs){
 		if(rhs.sign_==0)
 			return *this;
-		BigInt tmp=rhs;
-		if(tmp.sign_!=0)
-			tmp.sign_=-tmp.sign_;
-		return (*this+=tmp);
+		if(sign_==0){
+			*this=rhs;
+			sign_=-sign_;
+			return *this;
+		}
+		if(sign_!=rhs.sign_){
+			const std::size_t need=
+				std::max(limbs_.size(),rhs.limbs_.size())+std::size_t(1);
+			limbs_.reserve(need);
+			detail::add_abs_ip(limbs_,rhs.limbs_);
+			return *this;
+		}
+
+		const int cmp=detail::cmp_abs(limbs_,rhs.limbs_);
+		if(cmp==0){
+			sign_=0;
+			limbs_.clear();
+			return *this;
+		}
+		if(cmp>0){
+			detail::sub_abs_ip(limbs_,rhs.limbs_);
+		}else{
+			limbs_=detail::sub_abs(rhs.limbs_,limbs_);
+			sign_=-sign_;
+		}
+		normalize();
+		return *this;
 	}
 
 	BigInt&operator*=(const BigInt&rhs){
@@ -3687,7 +4214,7 @@ class BigInt{
 	BigInt&operator<<=(std::size_t bits){
 		if(sign_==0||bits==0)
 			return *this;
-		limbs_=detail::shl_bits(limbs_,bits);
+		detail::shl_ip(limbs_,bits);
 		return *this;
 	}
 
@@ -3695,8 +4222,8 @@ class BigInt{
 		if(sign_==0||bits==0)
 			return *this;
 		if(sign_>0){
-			limbs_=detail::shr_bits(limbs_,bits);
-			normalize();
+			detail::shr_ip(limbs_,bits);
+			sign_=limbs_.empty()?0:1;
 			return *this;
 		}
 
@@ -3723,7 +4250,7 @@ class BigInt{
 			}
 		}
 
-		limbs_=detail::shr_bits(limbs_,bits);
+		detail::shr_ip(limbs_,bits);
 		if(lost){
 			static const detail::limbs_t kOne{1};
 			limbs_=detail::add_abs(limbs_,kOne);
@@ -3733,42 +4260,122 @@ class BigInt{
 	}
 
 	BigInt&operator&=(const BigInt&rhs){
-		const std::size_t width=std::max(limbs_.size(),rhs.limbs_.size())+1;
-		detail::limbs_t a_tc=detail::to_2sc(limbs_,sign_,width);
-		const detail::limbs_t b_tc=
-			detail::to_2sc(rhs.limbs_,rhs.sign_,width);
-		detail::vecab::and_n(a_tc.data(),a_tc.data(),b_tc.data(),width);
-		auto sr=detail::from_2sc(std::move(a_tc));
-		sign_=sr.first;
-		limbs_=std::move(sr.second);
-		normalize();
-		return *this;
+		if(sign_>=0&&rhs.sign_>=0){
+			const std::size_t n=std::min(limbs_.size(),rhs.limbs_.size());
+			if(n==0){
+				sign_=0;
+				limbs_.clear();
+				return *this;
+			}
+			detail::vecab::and_n(limbs_.data(),limbs_.data(),
+								  rhs.limbs_.data(),n);
+			limbs_.resize(n);
+			detail::trim_lz(limbs_);
+			sign_=limbs_.empty()?0:1;
+			return *this;
+		}
+		if(sign_>=0&&rhs.sign_<0){
+			limbs_=detail::bit_and_pn_abs(limbs_,rhs.limbs_);
+			sign_=limbs_.empty()?0:1;
+			return *this;
+		}
+		if(sign_<0&&rhs.sign_>=0){
+			limbs_=detail::bit_and_pn_abs(rhs.limbs_,limbs_);
+			sign_=limbs_.empty()?0:1;
+			return *this;
+		}
+		{
+			detail::limbs_t am1=detail::sub_one(limbs_);
+			detail::limbs_t bm1=detail::sub_one(rhs.limbs_);
+			limbs_=detail::bit_or_abs(am1,bm1);
+			detail::add_one_ip(limbs_);
+			sign_=-1;
+			return *this;
+		}
 	}
 
 	BigInt&operator|=(const BigInt&rhs){
-		const std::size_t width=std::max(limbs_.size(),rhs.limbs_.size())+1;
-		detail::limbs_t a_tc=detail::to_2sc(limbs_,sign_,width);
-		const detail::limbs_t b_tc=
-			detail::to_2sc(rhs.limbs_,rhs.sign_,width);
-		detail::vecab::or_n(a_tc.data(),a_tc.data(),b_tc.data(),width);
-		auto sr=detail::from_2sc(std::move(a_tc));
-		sign_=sr.first;
-		limbs_=std::move(sr.second);
-		normalize();
-		return *this;
+		if(sign_>=0&&rhs.sign_>=0){
+			if(rhs.sign_==0)
+				return *this;
+			if(sign_==0){
+				*this=rhs;
+				return *this;
+			}
+			const std::size_t old_size=limbs_.size();
+			const std::size_t n=std::min(old_size,rhs.limbs_.size());
+			const std::size_t out_size=std::max(old_size,rhs.limbs_.size());
+			limbs_.resize_uninit(out_size);
+			detail::vecab::or_n(limbs_.data(),limbs_.data(),
+								 rhs.limbs_.data(),n);
+			if(rhs.limbs_.size()>old_size){
+				std::memcpy(limbs_.data()+static_cast<std::ptrdiff_t>(old_size),
+							rhs.limbs_.data()+static_cast<std::ptrdiff_t>(old_size),
+							(rhs.limbs_.size()-old_size)*sizeof(limb_t));
+			}
+			sign_=1;
+			return *this;
+		}
+		if(sign_>=0&&rhs.sign_<0){
+			limbs_=detail::bit_or_pn_mag(limbs_,rhs.limbs_);
+			sign_=-1;
+			return *this;
+		}
+		if(sign_<0&&rhs.sign_>=0){
+			limbs_=detail::bit_or_pn_mag(rhs.limbs_,limbs_);
+			sign_=-1;
+			return *this;
+		}
+		{
+			detail::limbs_t am1=detail::sub_one(limbs_);
+			detail::limbs_t bm1=detail::sub_one(rhs.limbs_);
+			limbs_=detail::bit_and_abs(am1,bm1);
+			detail::add_one_ip(limbs_);
+			sign_=-1;
+			return *this;
+		}
 	}
 
 	BigInt&operator^=(const BigInt&rhs){
-		const std::size_t width=std::max(limbs_.size(),rhs.limbs_.size())+1;
-		detail::limbs_t a_tc=detail::to_2sc(limbs_,sign_,width);
-		const detail::limbs_t b_tc=
-			detail::to_2sc(rhs.limbs_,rhs.sign_,width);
-		detail::vecab::xor_n(a_tc.data(),a_tc.data(),b_tc.data(),width);
-		auto sr=detail::from_2sc(std::move(a_tc));
-		sign_=sr.first;
-		limbs_=std::move(sr.second);
-		normalize();
-		return *this;
+		if(sign_>=0&&rhs.sign_>=0){
+			if(rhs.sign_==0)
+				return *this;
+			if(sign_==0){
+				*this=rhs;
+				return *this;
+			}
+			const std::size_t old_size=limbs_.size();
+			const std::size_t n=std::min(old_size,rhs.limbs_.size());
+			const std::size_t out_size=std::max(old_size,rhs.limbs_.size());
+			limbs_.resize_uninit(out_size);
+			detail::vecab::xor_n(limbs_.data(),limbs_.data(),
+								  rhs.limbs_.data(),n);
+			if(rhs.limbs_.size()>old_size){
+				std::memcpy(limbs_.data()+static_cast<std::ptrdiff_t>(old_size),
+							rhs.limbs_.data()+static_cast<std::ptrdiff_t>(old_size),
+							(rhs.limbs_.size()-old_size)*sizeof(limb_t));
+			}
+			detail::trim_lz(limbs_);
+			sign_=limbs_.empty()?0:1;
+			return *this;
+		}
+		if(sign_>=0&&rhs.sign_<0){
+			limbs_=detail::bit_xor_pn_mag(limbs_,rhs.limbs_);
+			sign_=-1;
+			return *this;
+		}
+		if(sign_<0&&rhs.sign_>=0){
+			limbs_=detail::bit_xor_pn_mag(rhs.limbs_,limbs_);
+			sign_=-1;
+			return *this;
+		}
+		{
+			detail::limbs_t am1=detail::sub_one(limbs_);
+			detail::limbs_t bm1=detail::sub_one(rhs.limbs_);
+			limbs_=detail::bit_xor_abs(am1,bm1);
+			sign_=limbs_.empty()?0:1;
+			return *this;
+		}
 	}
 
 	friend int compare(const BigInt&a,const BigInt&b) noexcept{
@@ -3819,7 +4426,17 @@ class BigInt{
 	friend void mkodd_ip(BigInt&x);
 	friend BigInt gcd_sm_bin(BigInt a,BigInt b);
 	friend BigInt modpow(BigInt base,BigInt exp,const BigInt&mod);
+	friend bool invert(BigInt*rop,const BigInt&a,const BigInt&mod);
+	friend BigInt divexact(const BigInt&a,const BigInt&b);
+	friend BigInt factorial(std::uint64_t n);
+	friend BigInt binomial(std::uint64_t n,std::uint64_t k);
 	friend BigInt operator+(const BigInt&a,const BigInt&b);
+	friend BigInt operator-(const BigInt&a,const BigInt&b);
+	friend BigInt operator<<(const BigInt&v,std::size_t bits);
+	friend BigInt operator>>(const BigInt&v,std::size_t bits);
+	friend BigInt operator&(const BigInt&a,const BigInt&b);
+	friend BigInt operator|(const BigInt&a,const BigInt&b);
+	friend BigInt operator^(const BigInt&a,const BigInt&b);
 
   private:
 	static BigInt from_raw(int sign,detail::limbs_t mag){
@@ -3916,9 +4533,34 @@ inline BigInt operator+(const BigInt&a,const BigInt&b){
 	out.normalize();
 	return out;
 }
-inline BigInt operator-(BigInt lhs,const BigInt&rhs){
-	lhs-=rhs;
-	return lhs;
+inline BigInt operator-(const BigInt&a,const BigInt&b){
+	if(std::max(a.limbs_.size(),b.limbs_.size())<=MINI_MP_INLINE_LIMBS){
+		BigInt out=a;
+		out-=b;
+		return out;
+	}
+	if(b.sign_==0)
+		return a;
+	if(a.sign_==0)
+		return b.neg();
+	BigInt out;
+	if(a.sign_!=b.sign_){
+		detail::add_abs_to(out.limbs_,a.limbs_,b.limbs_);
+		out.sign_=a.sign_;
+		return out;
+	}
+	const int cmp=detail::cmp_abs(a.limbs_,b.limbs_);
+	if(cmp==0)
+		return BigInt();
+	if(cmp>0){
+		detail::sub_abs_to(out.limbs_,a.limbs_,b.limbs_);
+		out.sign_=a.sign_;
+	}else{
+		detail::sub_abs_to(out.limbs_,b.limbs_,a.limbs_);
+		out.sign_=-a.sign_;
+	}
+	out.normalize();
+	return out;
 }
 inline BigInt operator*(BigInt lhs,const BigInt&rhs){
 	lhs*=rhs;
@@ -3935,25 +4577,87 @@ inline BigInt operator%(BigInt lhs,const BigInt&rhs){
 inline BigInt operator-(const BigInt&v){ return v.neg(); }
 inline BigInt operator+(const BigInt&v){ return v; }
 
-inline BigInt operator<<(BigInt v,std::size_t bits){
-	v<<=bits;
-	return v;
+inline BigInt operator<<(const BigInt&v,std::size_t bits){
+	if(v.sign_==0||bits==0)
+		return v;
+	BigInt out;
+	out.sign_=v.sign_;
+	detail::shl_into(out.limbs_,v.limbs_,bits);
+	return out;
 }
-inline BigInt operator>>(BigInt v,std::size_t bits){
-	v>>=bits;
-	return v;
+inline BigInt operator>>(const BigInt&v,std::size_t bits){
+	if(v.sign_==0||bits==0)
+		return v;
+	if(v.sign_>0){
+		BigInt out;
+		detail::shr_into(out.limbs_,v.limbs_,bits);
+		out.sign_=out.limbs_.empty()?0:1;
+		return out;
+	}
+	if(v.limbs_.size()<=MINI_MP_INLINE_LIMBS){
+		BigInt out=v;
+		out>>=bits;
+		return out;
+	}
+	BigInt out=v;
+	out>>=bits;
+	return out;
 }
-inline BigInt operator&(BigInt lhs,const BigInt&rhs){
-	lhs&=rhs;
-	return lhs;
+inline BigInt operator&(const BigInt&a,const BigInt&b){
+	if(a.sign_>=0&&b.sign_>=0){
+		detail::limbs_t mag=detail::bit_and_abs(a.limbs_,b.limbs_);
+		return BigInt::from_raw(mag.empty()?0:1,std::move(mag));
+	}
+	if(a.sign_>=0){
+		detail::limbs_t mag=detail::bit_and_pn_abs(a.limbs_,b.limbs_);
+		return BigInt::from_raw(mag.empty()?0:1,std::move(mag));
+	}
+	if(b.sign_>=0){
+		detail::limbs_t mag=detail::bit_and_pn_abs(b.limbs_,a.limbs_);
+		return BigInt::from_raw(mag.empty()?0:1,std::move(mag));
+	}
+	detail::limbs_t am1=detail::sub_one(a.limbs_);
+	detail::limbs_t bm1=detail::sub_one(b.limbs_);
+	detail::limbs_t mag=detail::bit_or_abs(am1,bm1);
+	detail::add_one_ip(mag);
+	return BigInt::from_raw(-1,std::move(mag));
 }
-inline BigInt operator|(BigInt lhs,const BigInt&rhs){
-	lhs|=rhs;
-	return lhs;
+inline BigInt operator|(const BigInt&a,const BigInt&b){
+	if(a.sign_>=0&&b.sign_>=0){
+		detail::limbs_t mag=detail::bit_or_abs(a.limbs_,b.limbs_);
+		return BigInt::from_raw(mag.empty()?0:1,std::move(mag));
+	}
+	if(a.sign_>=0){
+		detail::limbs_t mag=detail::bit_or_pn_mag(a.limbs_,b.limbs_);
+		return BigInt::from_raw(-1,std::move(mag));
+	}
+	if(b.sign_>=0){
+		detail::limbs_t mag=detail::bit_or_pn_mag(b.limbs_,a.limbs_);
+		return BigInt::from_raw(-1,std::move(mag));
+	}
+	detail::limbs_t am1=detail::sub_one(a.limbs_);
+	detail::limbs_t bm1=detail::sub_one(b.limbs_);
+	detail::limbs_t mag=detail::bit_and_abs(am1,bm1);
+	detail::add_one_ip(mag);
+	return BigInt::from_raw(-1,std::move(mag));
 }
-inline BigInt operator^(BigInt lhs,const BigInt&rhs){
-	lhs^=rhs;
-	return lhs;
+inline BigInt operator^(const BigInt&a,const BigInt&b){
+	if(a.sign_>=0&&b.sign_>=0){
+		detail::limbs_t mag=detail::bit_xor_abs(a.limbs_,b.limbs_);
+		return BigInt::from_raw(mag.empty()?0:1,std::move(mag));
+	}
+	if(a.sign_>=0){
+		detail::limbs_t mag=detail::bit_xor_pn_mag(a.limbs_,b.limbs_);
+		return BigInt::from_raw(-1,std::move(mag));
+	}
+	if(b.sign_>=0){
+		detail::limbs_t mag=detail::bit_xor_pn_mag(b.limbs_,a.limbs_);
+		return BigInt::from_raw(-1,std::move(mag));
+	}
+	detail::limbs_t am1=detail::sub_one(a.limbs_);
+	detail::limbs_t bm1=detail::sub_one(b.limbs_);
+	detail::limbs_t mag=detail::bit_xor_abs(am1,bm1);
+	return BigInt::from_raw(mag.empty()?0:1,std::move(mag));
 }
 
 inline BigInt operator~(const BigInt&v){
@@ -5257,6 +5961,8 @@ inline BigInt gcd_hlprm(BigInt a,BigInt b,
 		a>>=shift;
 		b>>=shift;
 	}
+	mkodd_ip(a);
+	mkodd_ip(b);
 	if(a<b)
 		std::swap(a,b);
 	detail::ModKScr sc;
@@ -5331,6 +6037,11 @@ inline BigInt gcd_hlprm(BigInt a,BigInt b,
 		a.limbs_.swap(b.limbs_);
 		a.sign_=a.limbs_.empty()?0:1;
 		b.sign_=b.limbs_.empty()?0:1;
+		if(!b.is_zero()){
+			const std::size_t tz=detail::ctz(b.limbs_);
+			if(tz!=0)
+				detail::shr_ip(b.limbs_,tz);
+		}
 	}
 
 	if(shift!=0)
@@ -5730,13 +6441,87 @@ inline bool invert(BigInt*rop,const BigInt&a,const BigInt&mod){
 	if(mod.sign()<=0){
 		detail::throw_dom("invert: modulus must be positive");
 	}
-	const ExtGcdRes eg=extgcd(a,mod);
-	if(eg.g!=BigInt(1)){
+	BigInt old_r=mod;
+	BigInt r;
+	if(a.sign_>=0&&detail::cmp_abs(a.limbs_,mod.limbs_)<0){
+		r=a;
+	}else{
+		r=a%mod;
+		if(r.sign()<0)
+			r+=mod;
+	}
+	BigInt old_t(0);
+	BigInt t(1);
+	detail::limbs_t scaled;
+
+	auto submul_limb=[&](const BigInt&lhs,const BigInt&rhs,
+						 std::uint64_t mul) -> BigInt{
+		if(mul==0||rhs.sign_==0)
+			return lhs;
+		if(mul==1){
+			scaled=rhs.limbs_;
+		}else{
+			detail::mulbl_in(rhs.limbs_,mul,scaled);
+		}
+
+		BigInt out;
+		if(lhs.sign_==0){
+			out.sign_=-rhs.sign_;
+			out.limbs_=std::move(scaled);
+			return out;
+		}
+		if(lhs.sign_!=rhs.sign_){
+			out.sign_=lhs.sign_;
+			detail::add_abs_to(out.limbs_,lhs.limbs_,scaled);
+			return out;
+		}
+
+		const int cmp=detail::cmp_abs(lhs.limbs_,scaled);
+		if(cmp==0)
+			return BigInt();
+		if(cmp>0){
+			out.sign_=lhs.sign_;
+			detail::sub_abs_to(out.limbs_,lhs.limbs_,scaled);
+		}else{
+			out.sign_=-lhs.sign_;
+			detail::sub_abs_to(out.limbs_,scaled,lhs.limbs_);
+		}
+		return out;
+	};
+
+	while(!r.is_zero()){
+		auto qr=divmod(old_r,r);
+		const BigInt&q=qr.first;
+
+		old_r=std::move(r);
+		r=std::move(qr.second);
+
+		BigInt next_t;
+		if(q.limbs_.size()==1){
+			const std::uint64_t ql=q.limbs_[0];
+			if(ql==1){
+				next_t=old_t-t;
+			}else{
+				next_t=submul_limb(old_t,t,ql);
+			}
+		}else{
+			next_t=old_t-q*t;
+		}
+		old_t=std::move(t);
+		t=std::move(next_t);
+	}
+
+	if(old_r!=BigInt(1)){
 		if(rop!=nullptr)
 			*rop=BigInt();
 		return false;
 	}
-	BigInt x=eg.x%mod;
+	BigInt x;
+	if(detail::cmp_abs(old_t.limbs_,mod.limbs_)<0){
+		x=std::move(old_t);
+	}else{
+		x=old_t%mod;
+	}
 	if(x.sign()<0)
 		x+=mod;
 	if(rop!=nullptr)
@@ -5802,6 +6587,21 @@ inline BigInt cdiv_r(const BigInt&a,const BigInt&b){
 }
 
 inline BigInt divexact(const BigInt&a,const BigInt&b){
+	if(b.is_zero()){
+		detail::throw_dom("divexact: division by zero");
+	}
+	if(a.is_zero())
+		return BigInt();
+	if(b.limbs_.size()==1){
+		detail::limbs_t q=a.limbs_;
+		const std::uint64_t rem=detail::div_limb_ip(q,b.limbs_[0]);
+		if(rem!=0){
+			detail::throw_dom(
+				"divexact: dividend not divisible by divisor");
+		}
+		const int sign=q.empty()?0:((a.sign_==b.sign_)?1:-1);
+		return BigInt::from_raw(sign,std::move(q));
+	}
 	auto qr=divmod(a,b);
 	if(!qr.second.is_zero()){
 		detail::throw_dom(
@@ -6081,10 +6881,32 @@ inline BigInt next_prime(const BigInt&n,int rounds){
 	return x;
 }
 
+namespace detail{
+
+inline BigInt prod_u64_range(std::uint64_t lo,std::uint64_t hi){
+	if(lo>hi)
+		return BigInt(1);
+	if(hi-lo<=24u){
+		BigInt out(1);
+		for(std::uint64_t i=lo;i<=hi;++i)
+			out*=BigInt::from_u64(i);
+		return out;
+	}
+	const std::uint64_t mid=lo+(hi-lo)/2u;
+	return prod_u64_range(lo,mid)*prod_u64_range(mid+1u,hi);
+}
+
+}
+
 inline BigInt factorial(std::uint64_t n){
+	if(n>=192u)
+		return detail::prod_u64_range(2,n);
 	BigInt out(1);
+	detail::limbs_t tmp;
 	for(std::uint64_t i=2;i<=n;++i){
-		out*=BigInt::from_u64(i);
+		detail::mulbl_in(out.limbs_,i,tmp);
+		out.limbs_.swap(tmp);
+		out.sign_=1;
 	}
 	return out;
 }
@@ -6093,10 +6915,21 @@ inline BigInt binomial(std::uint64_t n,std::uint64_t k){
 	if(k>n)
 		return BigInt();
 	k=std::min(k,n-k);
+	if(k==0)
+		return BigInt(1);
+	if(k>=160u){
+		BigInt num=detail::prod_u64_range(n-k+1u,n);
+		BigInt den=detail::prod_u64_range(2,k);
+		return divexact(num,den);
+	}
 	BigInt out(1);
+	detail::limbs_t tmp;
 	for(std::uint64_t i=1;i<=k;++i){
-		out*=BigInt::from_u64(n-k+i);
-		out=divexact(out,BigInt::from_u64(i));
+		detail::mulbl_in(out.limbs_,n-k+i,tmp);
+		out.limbs_.swap(tmp);
+		const std::uint64_t rem=detail::div_limb_ip(out.limbs_,i);
+		MINI_MP_ASSERT(rem==0);
+		out.sign_=out.limbs_.empty()?0:1;
 	}
 	return out;
 }
