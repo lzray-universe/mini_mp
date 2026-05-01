@@ -37,24 +37,24 @@ same-size odd modulus and exponent 65537.
 
 | Case | mini_mp | mini-gmp | Ratio |
 | --- | ---: | ---: | ---: |
-| 4096-bit multiply | 1,825.7 | 26,438.6 | 0.069 |
-| 4096-bit square | 3,134.3 | 26,122.9 | 0.120 |
-| 4096-bit truncate divide+remainder | 2,070.0 | 5,200.0 | 0.398 |
-| 4096-bit remainder | 1,350.0 | 5,185.0 | 0.260 |
-| 4096-bit gcd | 104,955.6 | 247,511.1 | 0.424 |
-| 4096-bit parse base 16 | 1,483.3 | 1,820.7 | 0.815 |
-| 4096-bit format base 16 | 422.0 | 645.3 | 0.654 |
-| 4096-bit powm65537 | 158,500.0 | 788,166.7 | 0.201 |
-| 16384-bit multiply | 28,483.3 | 425,150.0 | 0.067 |
-| 16384-bit square | 45,816.7 | 424,316.7 | 0.108 |
-| 16384-bit truncate divide+remainder | 26,150.0 | 77,600.0 | 0.337 |
-| 16384-bit remainder | 12,850.0 | 73,300.0 | 0.175 |
-| 16384-bit gcd | 2,401,200.0 | 3,579,200.0 | 0.671 |
-| 16384-bit parse base 16 | 6,084.4 | 12,002.2 | 0.507 |
-| 16384-bit format base 16 | 1,573.3 | 2,313.3 | 0.680 |
-| 16384-bit powm65537 | 2,400,000.0 | 12,545,500.0 | 0.191 |
-| binomial(1000, 500) | 13,957.5 | 122,391.7 | 0.114 |
-| factorial(1000) | 14,070.0 | 194,683.3 | 0.072 |
+| 4096-bit multiply | 1,672.9 | 26,810.0 | 0.062 |
+| 4096-bit square | 1,722.9 | 26,960.0 | 0.064 |
+| 4096-bit truncate divide+remainder | 2,165.0 | 5,190.0 | 0.417 |
+| 4096-bit remainder | 1,300.0 | 5,065.0 | 0.257 |
+| 4096-bit gcd | 104,044.4 | 248,177.8 | 0.419 |
+| 4096-bit parse base 16 | 1,614.0 | 1,884.7 | 0.856 |
+| 4096-bit format base 16 | 428.7 | 625.3 | 0.686 |
+| 4096-bit powm65537 | 153,416.7 | 791,166.7 | 0.194 |
+| 16384-bit multiply | 28,650.0 | 418,483.3 | 0.068 |
+| 16384-bit square | 28,050.0 | 420,366.7 | 0.067 |
+| 16384-bit truncate divide+remainder | 25,250.0 | 72,800.0 | 0.347 |
+| 16384-bit remainder | 12,850.0 | 72,550.0 | 0.177 |
+| 16384-bit gcd | 2,302,200.0 | 3,545,800.0 | 0.649 |
+| 16384-bit parse base 16 | 6,051.1 | 12,591.1 | 0.481 |
+| 16384-bit format base 16 | 1,524.4 | 2,306.7 | 0.661 |
+| 16384-bit powm65537 | 2,351,500.0 | 12,556,000.0 | 0.187 |
+| binomial(1000, 500) | 13,732.5 | 120,558.3 | 0.114 |
+| factorial(1000) | 13,965.0 | 193,675.0 | 0.072 |
 
 The 16384-bit cases are included because they exercise the larger-number
 dispatch paths: multiplication, squaring, division, gcd, and base conversion.
@@ -63,11 +63,12 @@ environment.
 
 ## NTT Multiplication Addendum
 
-The following numbers were measured with `MINI_MP_ENABLE_NTT=1` and SIMD still
-disabled. They call the direct NTT backend after a warm-up multiply, so root
-table setup is not included in the timed region. On this test machine the
-runtime tuner leaves NTT out of the default dispatch path, but the direct NTT
-backend becomes useful at larger sizes.
+The following diagnostic numbers were measured with `MINI_MP_ENABLE_NTT=1` and
+SIMD still disabled. They call the direct NTT backend after a warm-up multiply,
+so root table setup is not included in the timed region. On this test machine
+the runtime tuner leaves NTT out of the default dispatch path. The direct NTT
+backend is not recommended at 4096 or 16384 bits here; it only becomes useful at
+larger sizes.
 
 | Case | mini_mp direct NTT | mini-gmp | Ratio |
 | --- | ---: | ---: | ---: |

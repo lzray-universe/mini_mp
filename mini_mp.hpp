@@ -2823,67 +2823,7 @@ inline void mulsbk_in(const limbs_t&a,const limbs_t&b,
 inline limbs_t sqrsbk_ab(const limbs_t&x){
 	if(x.empty())
 		return {};
-	if(x.size()<=kCbaMax)
-		return sqrcba_ab(x);
-	const std::size_t n=x.size();
-	limbs_t out(2*n+1,0);
-
-	
-	for(std::size_t i=0;i<n;++i){
-		const std::uint64_t xi=x[i];
-		std::uint64_t carry=0;
-		for(std::size_t j=i+1;j<n;++j){
-			const std::size_t k=i+j;
-			out[k]=mulad64(xi,x[j],out[k],&carry);
-		}
-
-		std::size_t k=i+n;
-		for(;carry!=0&&k<out.size();++k){
-			std::uint64_t sum=0;
-			carry=addc_u64(0,out[k],carry,&sum);
-			out[k]=sum;
-		}
-		MINI_MP_ASSERT(carry==0);
-	}
-
-	
-	std::uint64_t carry_bit=0;
-	for(std::size_t i=0;i<out.size();++i){
-		const std::uint64_t v=out[i];
-		out[i]=(v<<1)|carry_bit;
-		carry_bit=(v>>63);
-	}
-	if(carry_bit!=0)
-		out.push_back(carry_bit);
-
-	
-	for(std::size_t i=0;i<n;++i){
-		const u128 p=mul_u64(x[i],x[i]);
-		const std::size_t k=2*i;
-
-		std::uint64_t t0=0;
-		const std::uint64_t c1=addc_u64(0,out[k],p.lo,&t0);
-		out[k]=t0;
-
-		std::uint64_t t1=0;
-		const std::uint64_t c2=addc_u64(0,out[k+1],p.hi,&t1);
-		std::uint64_t t2=0;
-		const std::uint64_t c3=addc_u64(0,t1,c1,&t2);
-		MINI_MP_ASSERT((c2&c3)==0);
-		out[k+1]=t2;
-
-		std::uint64_t carry=(c2|c3);
-		std::size_t idx=k+2;
-		for(;carry!=0&&idx<out.size();++idx){
-			std::uint64_t sum=0;
-			carry=addc_u64(0,out[idx],carry,&sum);
-			out[idx]=sum;
-		}
-		MINI_MP_ASSERT(carry==0);
-	}
-
-	trim_lz(out);
-	return out;
+	return mulsbk_ab(x,x);
 }
 
 inline limbs_t slc_limb(const limbs_t&x,std::size_t begin,std::size_t end){
@@ -2940,13 +2880,22 @@ inline void add_sh_ip(limbs_t&acc,const limbs_t&addend,
 
 inline constexpr std::size_t kKarRecB=24;
 
+inline std::size_t tun_krec() noexcept;
 inline std::size_t tun_kar() noexcept;
+inline std::size_t tun_kar_imb() noexcept;
+inline std::size_t tun_ntt_imb() noexcept;
+inline std::size_t tun_bz_min() noexcept;
+inline std::size_t tun_bz_chunk() noexcept;
+inline std::size_t tun_prod_leaf() noexcept;
+inline std::size_t tun_pow_w5() noexcept;
+inline std::size_t tun_pow_w6() noexcept;
 inline void ensure_at();
 
-inline limbs_t mulkar_rc(const limbs_t&a,const limbs_t&b){
+inline limbs_t mulkar_rc(const limbs_t&a,const limbs_t&b,
+								 std::size_t rec_b){
 	if(a.empty()||b.empty())
 		return {};
-	if(std::min(a.size(),b.size())<=kKarRecB){
+	if(std::min(a.size(),b.size())<=rec_b){
 		return mulsbk_ab(a,b);
 	}
 
@@ -2965,12 +2914,12 @@ inline limbs_t mulkar_rc(const limbs_t&a,const limbs_t&b){
 		return mulsbk_ab(a,b);
 	}
 
-	const limbs_t z0=mulkar_rc(a0,b0);
-	const limbs_t z2=mulkar_rc(a1,b1);
+	const limbs_t z0=mulkar_rc(a0,b0,rec_b);
+	const limbs_t z2=mulkar_rc(a1,b1,rec_b);
 	const limbs_t a01=add_abs(a0,a1);
 	const limbs_t b01=add_abs(b0,b1);
 
-	limbs_t z1=mulkar_rc(a01,b01);
+	limbs_t z1=mulkar_rc(a01,b01,rec_b);
 	const limbs_t z0z2=add_abs(z0,z2);
 	if(cmp_abs(z1,z0z2)<0){
 		
@@ -2988,13 +2937,52 @@ inline limbs_t mulkar_rc(const limbs_t&a,const limbs_t&b){
 inline limbs_t mulkar_ab(const limbs_t&a,const limbs_t&b){
 	if(a.empty()||b.empty())
 		return {};
-	return mulkar_rc(a,b);
+	return mulkar_rc(a,b,tun_krec());
+}
+
+inline limbs_t sqrkar_rc(const limbs_t&x,std::size_t rec_b){
+	if(x.empty())
+		return {};
+	if(x.size()<=rec_b)
+		return sqrsbk_ab(x);
+
+	const std::size_t n=x.size();
+	const std::size_t m=n/2;
+	if(m==0)
+		return sqrsbk_ab(x);
+
+	const limbs_t x0=slc_limb(x,0,m);
+	const limbs_t x1=slc_limb(x,m,x.size());
+	if(x1.empty())
+		return sqrsbk_ab(x);
+
+	const limbs_t z0=sqrkar_rc(x0,rec_b);
+	const limbs_t z2=sqrkar_rc(x1,rec_b);
+	const limbs_t x01=add_abs(x0,x1);
+
+	limbs_t z1=sqrkar_rc(x01,rec_b);
+	const limbs_t z0z2=add_abs(z0,z2);
+	if(cmp_abs(z1,z0z2)<0)
+		return sqrsbk_ab(x);
+	z1=sub_abs(z1,z0z2);
+
+	limbs_t out=z0;
+	add_sh_ip(out,z1,m);
+	add_sh_ip(out,z2,2*m);
+	trim_lz(out);
+	return out;
+}
+
+inline limbs_t sqrkar_ab(const limbs_t&x){
+	if(x.empty())
+		return {};
+	return sqrkar_rc(x,tun_krec());
 }
 
 inline bool mulbig_ok(std::size_t an,std::size_t bn) noexcept{
 	const std::size_t nmin=std::min(an,bn);
 	const std::size_t nmax=std::max(an,bn);
-	return nmin!=0&&nmax<=nmin*4u;
+	return nmin!=0&&nmax<=nmin*tun_kar_imb();
 }
 
 inline void mulbig_in(const limbs_t&a,const limbs_t&b,
@@ -3028,7 +3016,7 @@ inline void sqrbig_in(const limbs_t&x,limbs_t&out){
 	}
 	ensure_at();
 	if(x.size()>=tun_kar()){
-		out=mulkar_ab(x,x);
+		out=sqrkar_ab(x);
 		return;
 	}
 	out=sqrsbk_ab(x);
@@ -3666,9 +3654,9 @@ inline void sqrmod_ip(limbs_t&x,const limbs_t&mod,MulModScr&sc){
 }
 
 inline unsigned mpw_bits(std::size_t exp_bits) noexcept{
-	if(exp_bits>=1536)
+	if(exp_bits>=tun_pow_w6())
 		return 6;
-	if(exp_bits>=384)
+	if(exp_bits>=tun_pow_w5())
 		return 5;
 	return 4;
 }
@@ -3817,15 +3805,15 @@ inline bool use_bzdiv(std::size_t u_limbs,
 									   std::size_t v_limbs) noexcept{
 	
 	
-	constexpr std::size_t kBzDivMn=128;
-	constexpr std::size_t kBzChunk=3;
-	if(v_limbs<kBzDivMn)
+	const std::size_t bz_min=tun_bz_min();
+	const std::size_t bz_chunk=tun_bz_chunk();
+	if(v_limbs<bz_min)
 		return false;
 	if(u_limbs<=v_limbs)
 		return false;
 	const std::size_t q_limbs=u_limbs-v_limbs+1;
 	const std::size_t chunks=(q_limbs+v_limbs-1)/v_limbs;
-	return chunks>=kBzChunk;
+	return chunks>=bz_chunk;
 }
 
 
@@ -3936,17 +3924,46 @@ inline constexpr std::size_t kKarImb=4;
 inline constexpr std::size_t kNttImb=2;
 inline constexpr std::size_t kHlmDef=4;
 inline constexpr std::size_t kHlrDef=0;
+inline constexpr std::size_t kBzDivMnDef=128;
+inline constexpr std::size_t kBzChunkDef=3;
+inline constexpr std::size_t kGcdSmMxDef=64;
+inline constexpr std::size_t kGcdLgMxDef=8;
+inline constexpr std::size_t kProdLeafDef=24;
+inline constexpr std::size_t kFacTreeDef=192;
+inline constexpr std::size_t kBinomTreeDef=160;
+inline constexpr std::size_t kPowW5Def=384;
+inline constexpr std::size_t kPowW6Def=1536;
 
 inline std::size_t tun_ntt() noexcept;
+inline std::size_t tun_krec() noexcept;
 inline std::size_t tun_kar() noexcept;
+inline std::size_t tun_kar_imb() noexcept;
+inline std::size_t tun_ntt_imb() noexcept;
 inline std::size_t tun_hmin() noexcept;
 inline std::size_t tun_hrnd() noexcept;
+inline std::size_t tun_gcd_sm() noexcept;
+inline std::size_t tun_gcd_lg() noexcept;
+inline std::size_t tun_bz_min() noexcept;
+inline std::size_t tun_bz_chunk() noexcept;
+inline std::size_t tun_prod_leaf() noexcept;
+inline std::size_t tun_fac_tree() noexcept;
+inline std::size_t tun_binom_tree() noexcept;
+inline std::size_t tun_pow_w5() noexcept;
+inline std::size_t tun_pow_w6() noexcept;
 inline void ensure_at();
 
 } 
 
 class BigInt;
 class BigRat;
+
+namespace detail{
+inline BigInt factorial_loop(std::uint64_t n);
+inline BigInt factorial_tree(std::uint64_t n,std::size_t leaf);
+inline BigInt binomial_loop(std::uint64_t n,std::uint64_t k);
+inline BigInt binomial_tree(std::uint64_t n,std::uint64_t k,
+							std::size_t leaf);
+}
 
 struct ExtGcdRes;
 
@@ -4567,6 +4584,11 @@ class BigInt{
 	friend BigInt divexact(const BigInt&a,const BigInt&b);
 	friend BigInt factorial(std::uint64_t n);
 	friend BigInt binomial(std::uint64_t n,std::uint64_t k);
+	friend BigInt detail::factorial_loop(std::uint64_t n);
+	friend BigInt detail::factorial_tree(std::uint64_t n,std::size_t leaf);
+	friend BigInt detail::binomial_loop(std::uint64_t n,std::uint64_t k);
+	friend BigInt detail::binomial_tree(std::uint64_t n,std::uint64_t k,
+										 std::size_t leaf);
 	friend BigInt operator+(const BigInt&a,const BigInt&b);
 	friend BigInt operator-(const BigInt&a,const BigInt&b);
 	friend BigInt operator<<(const BigInt&v,std::size_t bits);
@@ -4699,9 +4721,8 @@ inline BigInt operator-(const BigInt&a,const BigInt&b){
 	out.normalize();
 	return out;
 }
-inline BigInt operator*(BigInt lhs,const BigInt&rhs){
-	lhs*=rhs;
-	return lhs;
+inline BigInt operator*(const BigInt&lhs,const BigInt&rhs){
+	return mul_disp(lhs,rhs);
 }
 inline BigInt operator/(BigInt lhs,const BigInt&rhs){
 	lhs/=rhs;
@@ -4824,8 +4845,8 @@ inline BigInt mul_kar(const BigInt&a,const BigInt&b){
 		return BigInt();
 	const std::size_t amin=std::min(a.limbs_.size(),b.limbs_.size());
 	const std::size_t amax=std::max(a.limbs_.size(),b.limbs_.size());
-	if(amin<detail::kKarRecB||
-	   (amin>0&&amax/amin>detail::kKarImb)){
+	if(amin<detail::tun_krec()||
+	   (amin>0&&amax/amin>detail::tun_kar_imb())){
 		return mul_sbk(a,b);
 	}
 	const detail::limbs_t mag=detail::mulkar_ab(a.limbs_,b.limbs_);
@@ -5485,11 +5506,11 @@ inline BigInt mul_disp(const BigInt&a,const BigInt&b){
 #if MINI_MP_ENABLE_NTT
 	const std::size_t ntt_thr=detail::tun_ntt();
 	if(ntt_thr!=detail::kNttOff&&nmin>=ntt_thr&&
-	   nmax<=nmin*detail::kNttImb){
+	   nmax<=nmin*detail::tun_ntt_imb()){
 		return mul_ntt(a,b);
 	}
 #endif
-	if(nmin>=kar_thr&&nmax<=nmin*detail::kKarImb){
+	if(nmin>=kar_thr&&nmax<=nmin*detail::tun_kar_imb()){
 		return mul_kar(a,b);
 	}
 	return mul_sbk(a,b);
@@ -5509,7 +5530,8 @@ inline BigInt sqr_disp(const BigInt&a){
 	}
 #endif
 	if(n>=kar_thr){
-		return mul_kar(a,a);
+		detail::limbs_t mag=detail::sqrkar_ab(a.limbs_);
+		return BigInt::from_raw(1,std::move(mag));
 	}
 	const detail::limbs_t mag=detail::sqrsbk_ab(a.limbs_);
 	return BigInt::from_raw(1,std::move(mag));
@@ -5656,10 +5678,12 @@ inline std::pair<BigInt,BigInt> dvm_knuth(const BigInt&a,const BigInt&b){
 }
 
 inline std::pair<BigInt,BigInt> divmod(const BigInt&a,const BigInt&b){
+	detail::ensure_at();
 	return dvm_knuth(a,b);
 }
 
 inline BigInt divk_q(const BigInt&a,const BigInt&b){
+	detail::ensure_at();
 	if(b.is_zero()){
 		detail::throw_dom("divk_q: division by zero");
 	}
@@ -5730,6 +5754,7 @@ inline BigInt divk_q(const BigInt&a,const BigInt&b){
 }
 
 inline BigInt divk_r(const BigInt&a,const BigInt&b){
+	detail::ensure_at();
 	if(b.is_zero()){
 		detail::throw_dom("divk_r: division by zero");
 	}
@@ -5794,9 +5819,21 @@ namespace detail{
 
 struct ATState{
 	std::size_t ntt_th=kNttDef;
+	std::size_t kar_rec=kKarRecB;
 	std::size_t kar_th=kKarTh;
+	std::size_t kar_imb=kKarImb;
+	std::size_t ntt_imb=kNttImb;
 	std::size_t hl_min=kHlmDef;
 	std::size_t hl_rnd=kHlrDef;
+	std::size_t gcd_sm=kGcdSmMxDef;
+	std::size_t gcd_lg=kGcdLgMxDef;
+	std::size_t bz_min=kBzDivMnDef;
+	std::size_t bz_chunk=kBzChunkDef;
+	std::size_t prod_leaf=kProdLeafDef;
+	std::size_t fac_tree=kFacTreeDef;
+	std::size_t binom_tree=kBinomTreeDef;
+	std::size_t pow_w5=kPowW5Def;
+	std::size_t pow_w6=kPowW6Def;
 };
 
 inline ATState&at_state() noexcept{
@@ -5813,6 +5850,11 @@ inline std::atomic<bool>&at_done() noexcept{
 #endif
 	};
 	return done;
+}
+
+inline bool&at_busy() noexcept{
+	static thread_local bool busy=false;
+	return busy;
 }
 
 inline std::uint64_t at_rng(std::uint64_t&s) noexcept{
@@ -5888,12 +5930,158 @@ inline std::uint64_t bench_mul(const BigInt&a,const BigInt&b,
 		std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count());
 }
 
+inline limbs_t mk_limb_bench(std::uint64_t&seed,std::size_t limbs){
+	limbs_t out(limbs);
+	for(std::size_t i=0;i<limbs;++i)
+		out[i]=at_rng(seed);
+	if(!out.empty()&&out.back()==0)
+		out.back()=1;
+	return out;
+}
+
+inline std::uint64_t bench_div_abs(const limbs_t&u,const limbs_t&v,
+											  int loops,bool use_bz){
+	volatile std::size_t sink=0;
+	const auto t0=std::chrono::steady_clock::now();
+	for(int i=0;i<loops;++i){
+		auto qr=use_bz?dvmbz_abs(u,v):dvmk_absl(u,v);
+		sink^=qr.first.size();
+		sink^=qr.second.size();
+	}
+	const auto t1=std::chrono::steady_clock::now();
+	(void)sink;
+	return static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count());
+}
+
+inline BigInt prod_u64_range_leaf(std::uint64_t lo,std::uint64_t hi,
+								  std::size_t leaf){
+	if(lo>hi)
+		return BigInt(1);
+	if(hi-lo<=leaf){
+		BigInt out(1);
+		for(std::uint64_t i=lo;i<=hi;++i)
+			out*=BigInt::from_u64(i);
+		return out;
+	}
+	const std::uint64_t mid=lo+(hi-lo)/2u;
+	return prod_u64_range_leaf(lo,mid,leaf)*
+		   prod_u64_range_leaf(mid+1u,hi,leaf);
+}
+
+inline BigInt prod_u64_range(std::uint64_t lo,std::uint64_t hi){
+	return prod_u64_range_leaf(lo,hi,tun_prod_leaf());
+}
+
+inline BigInt factorial_loop(std::uint64_t n){
+	BigInt out(1);
+	limbs_t tmp;
+	for(std::uint64_t i=2;i<=n;++i){
+		mulbl_in(out.limbs_,i,tmp);
+		out.limbs_.swap(tmp);
+		out.sign_=1;
+	}
+	return out;
+}
+
+inline BigInt factorial_tree(std::uint64_t n,std::size_t leaf){
+	return prod_u64_range_leaf(2,n,leaf);
+}
+
+inline BigInt binomial_loop(std::uint64_t n,std::uint64_t k){
+	k=std::min(k,n-k);
+	BigInt out(1);
+	limbs_t tmp;
+	for(std::uint64_t i=1;i<=k;++i){
+		mulbl_in(out.limbs_,n-k+i,tmp);
+		out.limbs_.swap(tmp);
+		const std::uint64_t rem=div_limb_ip(out.limbs_,i);
+		MINI_MP_ASSERT(rem==0);
+		out.sign_=out.limbs_.empty()?0:1;
+	}
+	return out;
+}
+
+inline BigInt binomial_tree(std::uint64_t n,std::uint64_t k,
+							std::size_t leaf){
+	k=std::min(k,n-k);
+	BigInt num=prod_u64_range_leaf(n-k+1u,n,leaf);
+	BigInt den=prod_u64_range_leaf(2,k,leaf);
+	return divexact(num,den);
+}
+
+inline std::uint64_t bench_fact(std::uint64_t n,int loops,
+									   bool tree,std::size_t leaf){
+	volatile std::size_t sink=0;
+	const auto t0=std::chrono::steady_clock::now();
+	for(int i=0;i<loops;++i){
+		BigInt x=tree?factorial_tree(n,leaf):factorial_loop(n);
+		sink^=x.bit_length();
+	}
+	const auto t1=std::chrono::steady_clock::now();
+	(void)sink;
+	return static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count());
+}
+
+inline std::uint64_t bench_binom(std::uint64_t n,std::uint64_t k,int loops,
+										bool tree,std::size_t leaf){
+	volatile std::size_t sink=0;
+	const auto t0=std::chrono::steady_clock::now();
+	for(int i=0;i<loops;++i){
+		BigInt x=tree?binomial_tree(n,k,leaf):binomial_loop(n,k);
+		sink^=x.bit_length();
+	}
+	const auto t1=std::chrono::steady_clock::now();
+	(void)sink;
+	return static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count());
+}
+
 inline void at_impl(){
 	ATState tuned{};
 	tuned.ntt_th=kNttOff;
+	tuned.kar_rec=kKarRecB;
 	tuned.kar_th=kKarTh;
+	tuned.kar_imb=kKarImb;
+	tuned.ntt_imb=kNttImb;
 	tuned.hl_min=kHlmDef;
 	tuned.hl_rnd=kHlrDef;
+	tuned.gcd_sm=kGcdSmMxDef;
+	tuned.gcd_lg=kGcdLgMxDef;
+	tuned.bz_min=kBzDivMnDef;
+	tuned.bz_chunk=kBzChunkDef;
+	tuned.prod_leaf=kProdLeafDef;
+	tuned.fac_tree=kFacTreeDef;
+	tuned.binom_tree=kBinomTreeDef;
+	tuned.pow_w5=kPowW5Def;
+	tuned.pow_w6=kPowW6Def;
+	at_state()=tuned;
+
+	{
+		std::uint64_t seed=0x27bb2ee687b0b0fdULL;
+		constexpr std::array<std::size_t,5> kRecCand={
+			16u,24u,32u,40u,48u};
+		std::uint64_t best_cost=std::numeric_limits<std::uint64_t>::max();
+		std::size_t best_rec=tuned.kar_rec;
+		for(std::size_t rec : kRecCand){
+			at_state().kar_rec=rec;
+			std::uint64_t cost=0;
+			std::uint64_t s=seed;
+			for(std::size_t n : {64u,128u,256u}){
+				const BigInt a=mk_bench(s,n);
+				const BigInt b=mk_bench(s,n);
+				const int loops=(n<=64u)?5:(n<=128u)?3:1;
+				cost+=bench_mul(a,b,loops,false);
+			}
+			if(cost<best_cost){
+				best_cost=cost;
+				best_rec=rec;
+			}
+		}
+		tuned.kar_rec=best_rec;
+		at_state().kar_rec=best_rec;
+	}
 
 	{
 		std::uint64_t seed=0xa24baed4963ee407ULL;
@@ -5932,6 +6120,49 @@ inline void at_impl(){
 			}
 		}
 		tuned.kar_th=best_th;
+		at_state().kar_th=best_th;
+	}
+
+	{
+		std::uint64_t seed=0x165667b19e3779f9ULL;
+		struct MulImbSample{
+			BigInt a;
+			BigInt b;
+			std::size_t nmin=0;
+			std::size_t nmax=0;
+			std::uint64_t school_ns=0;
+			std::uint64_t kar_ns=0;
+		};
+		std::vector<MulImbSample> samples;
+		for(const auto ab : {std::pair<std::size_t,std::size_t>{96u,192u},
+							 std::pair<std::size_t,std::size_t>{128u,384u},
+							 std::pair<std::size_t,std::size_t>{160u,640u}}){
+			MulImbSample s{};
+			s.a=mk_bench(seed,ab.first);
+			s.b=mk_bench(seed,ab.second);
+			s.nmin=std::min(ab.first,ab.second);
+			s.nmax=std::max(ab.first,ab.second);
+			const int loops=(s.nmax<=192u)?3:1;
+			s.school_ns=bench_sbk(s.a,s.b,loops);
+			s.kar_ns=bench_mul(s.a,s.b,loops,false);
+			samples.push_back(std::move(s));
+		}
+		constexpr std::array<std::size_t,5> kImbCand={2u,3u,4u,6u,8u};
+		std::uint64_t best_cost=std::numeric_limits<std::uint64_t>::max();
+		std::size_t best_imb=tuned.kar_imb;
+		for(std::size_t imb : kImbCand){
+			std::uint64_t cost=0;
+			for(const auto&s : samples){
+				const bool use_kar=s.nmin>=tuned.kar_th&&s.nmax<=s.nmin*imb;
+				cost+=use_kar?s.kar_ns:s.school_ns;
+			}
+			if(cost<best_cost){
+				best_cost=cost;
+				best_imb=imb;
+			}
+		}
+		tuned.kar_imb=best_imb;
+		at_state().kar_imb=best_imb;
 	}
 
 #if MINI_MP_ENABLE_NTT
@@ -5957,6 +6188,26 @@ inline void at_impl(){
 			}
 			prev_win=win;
 			prev_n=n;
+		}
+		at_state().ntt_th=tuned.ntt_th;
+		if(tuned.ntt_th!=kNttOff){
+			constexpr std::array<std::size_t,3> kNttImbCand={1u,2u,3u};
+			std::uint64_t seed2=0x2f2f2218beefcafeULL;
+			const BigInt a=mk_bench(seed2,tuned.ntt_th);
+			const BigInt b=mk_bench(seed2,tuned.ntt_th*2u);
+			const std::uint64_t t_kar=bench_mul(a,b,1,false);
+			const std::uint64_t t_ntt=bench_mul(a,b,1,true);
+			std::uint64_t best_cost=std::numeric_limits<std::uint64_t>::max();
+			std::size_t best_imb=tuned.ntt_imb;
+			for(std::size_t imb : kNttImbCand){
+				const std::uint64_t cost=(2u<=imb)?t_ntt:t_kar;
+				if(cost<best_cost){
+					best_cost=cost;
+					best_imb=imb;
+				}
+			}
+			tuned.ntt_imb=best_imb;
+			at_state().ntt_imb=best_imb;
 		}
 	}
 #endif
@@ -5998,6 +6249,188 @@ inline void at_impl(){
 		}
 		tuned.hl_min=best_min;
 		tuned.hl_rnd=best_rnd;
+		at_state().hl_min=best_min;
+		at_state().hl_rnd=best_rnd;
+
+		constexpr std::array<std::size_t,4> kGcdSmCand={32u,48u,64u,96u};
+		constexpr std::array<std::size_t,4> kGcdLgCand={4u,8u,12u,16u};
+		best_t=std::numeric_limits<std::uint64_t>::max();
+		std::size_t best_sm=tuned.gcd_sm;
+		std::size_t best_lg=tuned.gcd_lg;
+		for(std::size_t sm : kGcdSmCand){
+			for(std::size_t lg : kGcdLgCand){
+				at_state().gcd_sm=sm;
+				at_state().gcd_lg=lg;
+				const std::uint64_t t=
+					bench_gcd(samples,tuned.hl_min,tuned.hl_rnd);
+				if(t<best_t){
+					best_t=t;
+					best_sm=sm;
+					best_lg=lg;
+				}
+			}
+		}
+		tuned.gcd_sm=best_sm;
+		tuned.gcd_lg=best_lg;
+		at_state().gcd_sm=best_sm;
+		at_state().gcd_lg=best_lg;
+	}
+
+	{
+		std::uint64_t seed=0x9e0b5ad15eed1234ULL;
+		struct DivSample{
+			limbs_t u;
+			limbs_t v;
+			std::size_t v_limbs=0;
+			std::size_t chunks=0;
+			std::uint64_t knuth_ns=0;
+			std::uint64_t bz_ns=0;
+		};
+		std::vector<DivSample> samples;
+		for(const auto vc : {std::pair<std::size_t,std::size_t>{64u,2u},
+							 std::pair<std::size_t,std::size_t>{96u,3u},
+							 std::pair<std::size_t,std::size_t>{128u,4u}}){
+			DivSample s{};
+			s.v_limbs=vc.first;
+			s.chunks=vc.second;
+			s.v=mk_limb_bench(seed,s.v_limbs);
+			s.u=mk_limb_bench(seed,s.v_limbs*s.chunks);
+			if(cmp_abs(s.u,s.v)<0)
+				s.u.push_back(1);
+			s.knuth_ns=bench_div_abs(s.u,s.v,1,false);
+			s.bz_ns=bench_div_abs(s.u,s.v,1,true);
+			samples.push_back(std::move(s));
+		}
+		constexpr std::array<std::size_t,4> kBzMinCand={64u,96u,128u,192u};
+		constexpr std::array<std::size_t,3> kBzChunkCand={2u,3u,4u};
+		std::uint64_t best_cost=std::numeric_limits<std::uint64_t>::max();
+		std::size_t best_min=tuned.bz_min;
+		std::size_t best_chunk=tuned.bz_chunk;
+		for(std::size_t mn : kBzMinCand){
+			for(std::size_t ch : kBzChunkCand){
+				std::uint64_t cost=0;
+				for(const auto&s : samples){
+					const bool use_bz=s.v_limbs>=mn&&s.chunks>=ch;
+					cost+=use_bz?s.bz_ns:s.knuth_ns;
+				}
+				if(cost<best_cost){
+					best_cost=cost;
+					best_min=mn;
+					best_chunk=ch;
+				}
+			}
+		}
+		tuned.bz_min=best_min;
+		tuned.bz_chunk=best_chunk;
+		at_state().bz_min=best_min;
+		at_state().bz_chunk=best_chunk;
+	}
+
+	{
+		constexpr std::array<std::size_t,5> kLeafCand={
+			12u,18u,24u,36u,48u};
+		std::uint64_t best_cost=std::numeric_limits<std::uint64_t>::max();
+		std::size_t best_leaf=tuned.prod_leaf;
+		for(std::size_t leaf : kLeafCand){
+			const std::uint64_t t=bench_fact(384,2,true,leaf);
+			if(t<best_cost){
+				best_cost=t;
+				best_leaf=leaf;
+			}
+		}
+		tuned.prod_leaf=best_leaf;
+		at_state().prod_leaf=best_leaf;
+
+		constexpr std::array<std::size_t,5> kFacCand={
+			96u,128u,160u,192u,256u};
+		std::array<std::uint64_t,3> loop_ns{};
+		std::array<std::uint64_t,3> tree_ns{};
+		constexpr std::array<std::uint64_t,3> kFacSizes={96u,192u,384u};
+		for(std::size_t i=0;i<kFacSizes.size();++i){
+			const int loops=(kFacSizes[i]<=96u)?3:1;
+			loop_ns[i]=bench_fact(kFacSizes[i],loops,false,best_leaf);
+			tree_ns[i]=bench_fact(kFacSizes[i],loops,true,best_leaf);
+		}
+		best_cost=std::numeric_limits<std::uint64_t>::max();
+		std::size_t best_fac=tuned.fac_tree;
+		for(std::size_t th : kFacCand){
+			std::uint64_t cost=0;
+			for(std::size_t i=0;i<kFacSizes.size();++i)
+				cost+=(kFacSizes[i]>=th)?tree_ns[i]:loop_ns[i];
+			if(cost<best_cost){
+				best_cost=cost;
+				best_fac=th;
+			}
+		}
+		tuned.fac_tree=best_fac;
+		at_state().fac_tree=best_fac;
+
+		constexpr std::array<std::size_t,5> kBinomCand={
+			64u,96u,128u,160u,224u};
+		std::array<std::uint64_t,3> bloop_ns{};
+		std::array<std::uint64_t,3> btree_ns{};
+		constexpr std::array<std::uint64_t,3> kBinomK={64u,128u,256u};
+		for(std::size_t i=0;i<kBinomK.size();++i){
+			const int loops=(kBinomK[i]<=64u)?3:1;
+			bloop_ns[i]=bench_binom(kBinomK[i]*2u,kBinomK[i],
+									loops,false,best_leaf);
+			btree_ns[i]=bench_binom(kBinomK[i]*2u,kBinomK[i],
+									loops,true,best_leaf);
+		}
+		best_cost=std::numeric_limits<std::uint64_t>::max();
+		std::size_t best_binom=tuned.binom_tree;
+		for(std::size_t th : kBinomCand){
+			std::uint64_t cost=0;
+			for(std::size_t i=0;i<kBinomK.size();++i)
+				cost+=(kBinomK[i]>=th)?btree_ns[i]:bloop_ns[i];
+			if(cost<best_cost){
+				best_cost=cost;
+				best_binom=th;
+			}
+		}
+		tuned.binom_tree=best_binom;
+		at_state().binom_tree=best_binom;
+	}
+
+	{
+		std::uint64_t seed=0x7f4a7c159e3779b9ULL;
+		const BigInt base=mk_bench(seed,16);
+		BigInt mod=mk_bench(seed,16);
+		if(mod.is_even())
+			mod+=BigInt(1);
+		const BigInt exp_mid=mk_bench(seed,8);
+		const BigInt exp_big=mk_bench(seed,32);
+		constexpr std::array<std::size_t,3> kW5Cand={256u,384u,512u};
+		constexpr std::array<std::size_t,3> kW6Cand={1024u,1536u,2048u};
+		std::uint64_t best_cost=std::numeric_limits<std::uint64_t>::max();
+		std::size_t best_w5=tuned.pow_w5;
+		std::size_t best_w6=tuned.pow_w6;
+		for(std::size_t w5 : kW5Cand){
+			for(std::size_t w6 : kW6Cand){
+				if(w6<=w5)
+					continue;
+				at_state().pow_w5=w5;
+				at_state().pow_w6=w6;
+				volatile std::size_t sink=0;
+				const auto t0=std::chrono::steady_clock::now();
+				sink^=modpow(base,exp_mid,mod).bit_length();
+				sink^=modpow(base,exp_big,mod).bit_length();
+				const auto t1=std::chrono::steady_clock::now();
+				(void)sink;
+				const std::uint64_t cost=static_cast<std::uint64_t>(
+					std::chrono::duration_cast<std::chrono::nanoseconds>(
+						t1-t0).count());
+				if(cost<best_cost){
+					best_cost=cost;
+					best_w5=w5;
+					best_w6=w6;
+				}
+			}
+		}
+		tuned.pow_w5=best_w5;
+		tuned.pow_w6=best_w6;
+		at_state().pow_w5=best_w5;
+		at_state().pow_w6=best_w6;
 	}
 
 	at_state()=tuned;
@@ -6007,9 +6440,13 @@ inline void ensure_at(){
 #if MINI_MP_ENABLE_AUTOTUNE
 	if(at_done().load(std::memory_order_acquire))
 		return;
+	if(at_busy())
+		return;
 	static std::once_flag once;
 	std::call_once(once,[](){
+		at_busy()=true;
 		at_impl();
+		at_busy()=false;
 		at_done().store(true,std::memory_order_release);
 	});
 #endif
@@ -6019,8 +6456,20 @@ inline std::size_t tun_ntt() noexcept{
 	return at_state().ntt_th;
 }
 
+inline std::size_t tun_krec() noexcept{
+	return at_state().kar_rec;
+}
+
 inline std::size_t tun_kar() noexcept{
 	return at_state().kar_th;
+}
+
+inline std::size_t tun_kar_imb() noexcept{
+	return at_state().kar_imb;
+}
+
+inline std::size_t tun_ntt_imb() noexcept{
+	return at_state().ntt_imb;
 }
 
 inline std::size_t tun_hmin() noexcept{
@@ -6029,6 +6478,42 @@ inline std::size_t tun_hmin() noexcept{
 
 inline std::size_t tun_hrnd() noexcept{
 	return at_state().hl_rnd;
+}
+
+inline std::size_t tun_gcd_sm() noexcept{
+	return at_state().gcd_sm;
+}
+
+inline std::size_t tun_gcd_lg() noexcept{
+	return at_state().gcd_lg;
+}
+
+inline std::size_t tun_bz_min() noexcept{
+	return at_state().bz_min;
+}
+
+inline std::size_t tun_bz_chunk() noexcept{
+	return at_state().bz_chunk;
+}
+
+inline std::size_t tun_prod_leaf() noexcept{
+	return at_state().prod_leaf;
+}
+
+inline std::size_t tun_fac_tree() noexcept{
+	return at_state().fac_tree;
+}
+
+inline std::size_t tun_binom_tree() noexcept{
+	return at_state().binom_tree;
+}
+
+inline std::size_t tun_pow_w5() noexcept{
+	return at_state().pow_w5;
+}
+
+inline std::size_t tun_pow_w6() noexcept{
+	return at_state().pow_w6;
 }
 
 } 
@@ -6081,14 +6566,12 @@ inline BigInt gcd_hlprm(BigInt a,BigInt b,
 		const std::uint64_t r=detail::mod_limb(a.limbs_,b.limbs_[0]);
 		return BigInt::from_u64(std::gcd(b.limbs_[0],r));
 	}
-	constexpr std::size_t kGcdSmMx=64;
-	constexpr std::size_t kGcdLgMx=8;
 	const std::size_t init_mx=
 		std::max(a.limbs_.size(),b.limbs_.size());
 	const std::size_t smbin_mx=
-		(init_mx<=kGcdSmMx)
-			?kGcdSmMx
-			:kGcdLgMx;
+		(init_mx<=detail::tun_gcd_sm())
+			?detail::tun_gcd_sm()
+			:detail::tun_gcd_lg();
 	if(std::max(a.limbs_.size(),b.limbs_.size())<=smbin_mx){
 		return gcd_sm_bin(std::move(a),std::move(b));
 	}
@@ -6280,6 +6763,7 @@ inline BigInt old_modpow(BigInt base,const BigInt&exp,const BigInt&mod){
 } 
 
 inline BigInt modpow(BigInt base,BigInt exp,const BigInt&mod){
+	detail::ensure_at();
 	if(mod.sign()<=0){
 		detail::throw_dom("modpow: modulus must be positive");
 	}
@@ -7018,34 +7502,11 @@ inline BigInt next_prime(const BigInt&n,int rounds){
 	return x;
 }
 
-namespace detail{
-
-inline BigInt prod_u64_range(std::uint64_t lo,std::uint64_t hi){
-	if(lo>hi)
-		return BigInt(1);
-	if(hi-lo<=24u){
-		BigInt out(1);
-		for(std::uint64_t i=lo;i<=hi;++i)
-			out*=BigInt::from_u64(i);
-		return out;
-	}
-	const std::uint64_t mid=lo+(hi-lo)/2u;
-	return prod_u64_range(lo,mid)*prod_u64_range(mid+1u,hi);
-}
-
-}
-
 inline BigInt factorial(std::uint64_t n){
-	if(n>=192u)
-		return detail::prod_u64_range(2,n);
-	BigInt out(1);
-	detail::limbs_t tmp;
-	for(std::uint64_t i=2;i<=n;++i){
-		detail::mulbl_in(out.limbs_,i,tmp);
-		out.limbs_.swap(tmp);
-		out.sign_=1;
-	}
-	return out;
+	detail::ensure_at();
+	if(n>=detail::tun_fac_tree())
+		return detail::factorial_tree(n,detail::tun_prod_leaf());
+	return detail::factorial_loop(n);
 }
 
 inline BigInt binomial(std::uint64_t n,std::uint64_t k){
@@ -7054,21 +7515,10 @@ inline BigInt binomial(std::uint64_t n,std::uint64_t k){
 	k=std::min(k,n-k);
 	if(k==0)
 		return BigInt(1);
-	if(k>=160u){
-		BigInt num=detail::prod_u64_range(n-k+1u,n);
-		BigInt den=detail::prod_u64_range(2,k);
-		return divexact(num,den);
-	}
-	BigInt out(1);
-	detail::limbs_t tmp;
-	for(std::uint64_t i=1;i<=k;++i){
-		detail::mulbl_in(out.limbs_,n-k+i,tmp);
-		out.limbs_.swap(tmp);
-		const std::uint64_t rem=detail::div_limb_ip(out.limbs_,i);
-		MINI_MP_ASSERT(rem==0);
-		out.sign_=out.limbs_.empty()?0:1;
-	}
-	return out;
+	detail::ensure_at();
+	if(k>=detail::tun_binom_tree())
+		return detail::binomial_tree(n,k,detail::tun_prod_leaf());
+	return detail::binomial_loop(n,k);
 }
 
 inline std::pair<BigInt,BigInt> fib_pair(std::uint64_t n){
@@ -7411,10 +7861,36 @@ int main(){
 	}
 	std::cout<<"autotune.kar_th="
 			 <<mini_mp::detail::tun_kar()<<"\n";
+	std::cout<<"autotune.kar_rec="
+			 <<mini_mp::detail::tun_krec()<<"\n";
+	std::cout<<"autotune.kar_imb="
+			 <<mini_mp::detail::tun_kar_imb()<<"\n";
+#if MINI_MP_ENABLE_NTT
+	std::cout<<"autotune.ntt_imb="
+			 <<mini_mp::detail::tun_ntt_imb()<<"\n";
+#endif
 	std::cout<<"autotune.hl_min="
 			 <<mini_mp::detail::tun_hmin()<<"\n";
 	std::cout<<"autotune.hl_rnd="
 			 <<mini_mp::detail::tun_hrnd()<<"\n";
+	std::cout<<"autotune.gcd_small="
+			 <<mini_mp::detail::tun_gcd_sm()<<"\n";
+	std::cout<<"autotune.gcd_large="
+			 <<mini_mp::detail::tun_gcd_lg()<<"\n";
+	std::cout<<"autotune.bz_min="
+			 <<mini_mp::detail::tun_bz_min()<<"\n";
+	std::cout<<"autotune.bz_chunk="
+			 <<mini_mp::detail::tun_bz_chunk()<<"\n";
+	std::cout<<"autotune.prod_leaf="
+			 <<mini_mp::detail::tun_prod_leaf()<<"\n";
+	std::cout<<"autotune.factorial_tree="
+			 <<mini_mp::detail::tun_fac_tree()<<"\n";
+	std::cout<<"autotune.binomial_tree="
+			 <<mini_mp::detail::tun_binom_tree()<<"\n";
+	std::cout<<"autotune.pow_w5="
+			 <<mini_mp::detail::tun_pow_w5()<<"\n";
+	std::cout<<"autotune.pow_w6="
+			 <<mini_mp::detail::tun_pow_w6()<<"\n";
 
 	std::cout<<"\n[mul backend ns/op]\n";
 	std::cout<<std::left<<std::setw(10)<<"limbs"<<std::setw(14)<<"schoolbook"
