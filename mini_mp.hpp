@@ -1305,6 +1305,43 @@ inline bool test_bit(const limbs_t&x,std::size_t bit_index) noexcept{
 	return ((x[limb_index]>>bit_off)&1u)!=0;
 }
 
+inline bool pow2_abs(const limbs_t&x) noexcept{
+	bool seen=false;
+	for(limb_t v : x){
+		if(v==0)
+			continue;
+		if(!std::has_single_bit(v)||seen)
+			return false;
+		seen=true;
+	}
+	return seen;
+}
+
+inline std::size_t pow2_exp_abs(const limbs_t&x) noexcept{
+	MINI_MP_ASSERT(pow2_abs(x));
+	for(std::size_t i=0;i<x.size();++i){
+		if(x[i]!=0)
+			return i*64u+std::countr_zero(x[i]);
+	}
+	return 0;
+}
+
+inline limbs_t low_bits_abs(const limbs_t&x,std::size_t bits){
+	if(x.empty()||bits==0)
+		return {};
+	const std::size_t limb_n=bits/64u;
+	const unsigned bit_n=static_cast<unsigned>(bits%64u);
+	const std::size_t take=std::min(
+		x.size(),limb_n+((bit_n==0)?0u:1u));
+	limbs_t out;
+	out.assign(x.begin(),x.begin()+static_cast<std::ptrdiff_t>(take));
+	if(bit_n!=0&&limb_n<out.size()){
+		out[limb_n]&=(limb_t(1)<<bit_n)-1u;
+	}
+	trim_lz(out);
+	return out;
+}
+
 inline void set_bit(limbs_t&x,std::size_t bit_index){
 	const std::size_t limb_index=bit_index/64;
 	const unsigned bit_off=static_cast<unsigned>(bit_index%64);
@@ -1314,20 +1351,20 @@ inline void set_bit(limbs_t&x,std::size_t bit_index){
 	x[limb_index]|=(limb_t(1)<<bit_off);
 }
 
-inline std::size_t mpn_nsize(const std::uint64_t*ap,std::size_t n){
+inline std::size_t lb_nz(const std::uint64_t*ap,std::size_t n){
 	return vecab::nsz_n(ap,n);
 }
 
-inline bool mpn_zero_p(const std::uint64_t*ap,std::size_t n) noexcept{
+inline bool lb_zero(const std::uint64_t*ap,std::size_t n) noexcept{
 	return vecab::z_n(ap,n);
 }
 
-inline int mpn_cmp(const std::uint64_t*ap,const std::uint64_t*bp,
+inline int lb_cmp(const std::uint64_t*ap,const std::uint64_t*bp,
 				   std::size_t n) noexcept{
 	return vecab::cmp_n(ap,bp,n);
 }
 
-inline std::uint64_t mpn_add_1(std::uint64_t*rp,const std::uint64_t*ap,
+inline std::uint64_t add_1n(std::uint64_t*rp,const std::uint64_t*ap,
 							   std::size_t n,std::uint64_t b){
 	if(n==0)
 		return b;
@@ -1382,7 +1419,7 @@ inline std::uint64_t mpn_add_1(std::uint64_t*rp,const std::uint64_t*ap,
 #endif
 }
 
-inline std::uint64_t mpn_add_n(std::uint64_t*rp,const std::uint64_t*ap,
+inline std::uint64_t add_nn(std::uint64_t*rp,const std::uint64_t*ap,
 							   const std::uint64_t*bp,std::size_t n){
 	std::uint64_t carry=0;
 	for(std::size_t i=0;i<n;++i){
@@ -1393,7 +1430,7 @@ inline std::uint64_t mpn_add_n(std::uint64_t*rp,const std::uint64_t*ap,
 	return carry;
 }
 
-inline std::uint64_t mpn_add(std::uint64_t*rp,const std::uint64_t*ap,
+inline std::uint64_t add_nm(std::uint64_t*rp,const std::uint64_t*ap,
 							 std::size_t an,const std::uint64_t*bp,
 							 std::size_t bn){
 	MINI_MP_ASSERT(an>=bn);
@@ -1404,13 +1441,13 @@ inline std::uint64_t mpn_add(std::uint64_t*rp,const std::uint64_t*ap,
 		return 0;
 	}
 	if(bn==1){
-		return mpn_add_1(rp,ap,an,bp[0]);
+		return add_1n(rp,ap,an,bp[0]);
 	}
 	if(an==bn){
-		return mpn_add_n(rp,ap,bp,an);
+		return add_nn(rp,ap,bp,an);
 	}
 	std::uint64_t carry=0;
-	carry=mpn_add_n(rp,ap,bp,bn);
+	carry=add_nn(rp,ap,bp,bn);
 	if(carry==0){
 		if(rp!=ap&&an>bn){
 			std::memcpy(rp+static_cast<std::ptrdiff_t>(bn),
@@ -1421,12 +1458,12 @@ inline std::uint64_t mpn_add(std::uint64_t*rp,const std::uint64_t*ap,
 	}
 	if(an==bn)
 		return 1;
-	carry=mpn_add_1(rp+static_cast<std::ptrdiff_t>(bn),
+	carry=add_1n(rp+static_cast<std::ptrdiff_t>(bn),
 					ap+static_cast<std::ptrdiff_t>(bn),an-bn,carry);
 	return carry;
 }
 
-inline std::uint64_t mpn_sub_1(std::uint64_t*rp,const std::uint64_t*ap,
+inline std::uint64_t sub_1n(std::uint64_t*rp,const std::uint64_t*ap,
 							   std::size_t n,std::uint64_t b){
 	if(n==0)
 		return (b!=0)?1u:0u;
@@ -1487,7 +1524,7 @@ inline std::uint64_t mpn_sub_1(std::uint64_t*rp,const std::uint64_t*ap,
 #endif
 }
 
-inline std::uint64_t mpn_sub_n(std::uint64_t*rp,const std::uint64_t*ap,
+inline std::uint64_t sub_nn(std::uint64_t*rp,const std::uint64_t*ap,
 							   const std::uint64_t*bp,std::size_t n){
 	std::uint64_t borrow=0;
 	for(std::size_t i=0;i<n;++i){
@@ -1498,7 +1535,7 @@ inline std::uint64_t mpn_sub_n(std::uint64_t*rp,const std::uint64_t*ap,
 	return borrow;
 }
 
-inline std::uint64_t mpn_sub(std::uint64_t*rp,const std::uint64_t*ap,
+inline std::uint64_t sub_nm(std::uint64_t*rp,const std::uint64_t*ap,
 							 std::size_t an,const std::uint64_t*bp,
 							 std::size_t bn){
 	MINI_MP_ASSERT(an>=bn);
@@ -1509,15 +1546,15 @@ inline std::uint64_t mpn_sub(std::uint64_t*rp,const std::uint64_t*ap,
 		return 0;
 	}
 	std::uint64_t borrow=0;
-	borrow=mpn_sub_n(rp,ap,bp,bn);
+	borrow=sub_nn(rp,ap,bp,bn);
 	if(an==bn)
 		return borrow;
-	borrow=mpn_sub_1(rp+static_cast<std::ptrdiff_t>(bn),
+	borrow=sub_1n(rp+static_cast<std::ptrdiff_t>(bn),
 					 ap+static_cast<std::ptrdiff_t>(bn),an-bn,borrow);
 	return borrow;
 }
 
-inline std::uint64_t mpn_mul_1(std::uint64_t*rp,const std::uint64_t*ap,
+inline std::uint64_t mul_1n(std::uint64_t*rp,const std::uint64_t*ap,
 							   std::size_t n,std::uint64_t v){
 	std::uint64_t carry=0;
 	for(std::size_t i=0;i<n;++i){
@@ -1540,7 +1577,7 @@ inline std::uint64_t mpn_mul_1(std::uint64_t*rp,const std::uint64_t*ap,
 	return carry;
 }
 
-inline std::uint64_t mpn_adm1(std::uint64_t*rp,const std::uint64_t*ap,
+inline std::uint64_t am_1n(std::uint64_t*rp,const std::uint64_t*ap,
 								  std::size_t n,std::uint64_t v){
 	std::uint64_t carry=0;
 	for(std::size_t i=0;i<n;++i){
@@ -1568,7 +1605,7 @@ inline std::uint64_t mpn_adm1(std::uint64_t*rp,const std::uint64_t*ap,
 	return carry;
 }
 
-inline std::uint64_t mpn_sbm1(std::uint64_t*rp,const std::uint64_t*ap,
+inline std::uint64_t sm_1n(std::uint64_t*rp,const std::uint64_t*ap,
 								  std::size_t n,std::uint64_t v){
 	std::uint64_t borrow=0;
 	for(std::size_t i=0;i<n;++i){
@@ -1641,8 +1678,8 @@ inline void add_abs_to(limbs_t&out,const limbs_t&a,const limbs_t&b){
 	const std::size_t bn=bp->size();
 	out.resize_uninit(an+1);
 	const std::uint64_t carry=
-		(an==bn)?mpn_add_n(out.data(),ap->data(),bp->data(),an)
-				:mpn_add(out.data(),ap->data(),an,bp->data(),bn);
+		(an==bn)?add_nn(out.data(),ap->data(),bp->data(),an)
+				:add_nm(out.data(),ap->data(),an,bp->data(),bn);
 	out[an]=carry;
 	const std::size_t out_n=an+(carry!=0?1u:0u);
 	out.resize(out_n);
@@ -1656,9 +1693,9 @@ inline void sub_abs_to(limbs_t&out,const limbs_t&a,const limbs_t&b){
 	}
 	out.resize_uninit(a.size());
 	const std::uint64_t borrow=
-		mpn_sub(out.data(),a.data(),a.size(),b.data(),b.size());
+		sub_nm(out.data(),a.data(),a.size(),b.data(),b.size());
 	MINI_MP_ASSERT(borrow==0);
-	out.resize(mpn_nsize(out.data(),out.size()));
+	out.resize(lb_nz(out.data(),out.size()));
 }
 
 inline limbs_t add_abs(const limbs_t&a,const limbs_t&b){
@@ -1678,7 +1715,7 @@ inline void add_abs_ip(limbs_t&a,const limbs_t&b){
 	}
 	if(&a==&b){
 		a.reserve(na+1);
-		const std::uint64_t carry=mpn_add_n(a.data(),a.data(),a.data(),na);
+		const std::uint64_t carry=add_nn(a.data(),a.data(),a.data(),na);
 		if(carry!=0){
 			a.push_back(carry);
 		}
@@ -1688,8 +1725,8 @@ inline void add_abs_ip(limbs_t&a,const limbs_t&b){
 	if(na>=nb){
 		a.reserve(na+1);
 		const std::uint64_t carry=
-			(na==nb)?mpn_add_n(a.data(),a.data(),b.data(),na)
-					:mpn_add(a.data(),a.data(),na,b.data(),nb);
+			(na==nb)?add_nn(a.data(),a.data(),b.data(),na)
+					:add_nm(a.data(),a.data(),na,b.data(),nb);
 		if(carry!=0){
 			a.push_back(carry);
 		}
@@ -1702,10 +1739,10 @@ inline void add_abs_ip(limbs_t&a,const limbs_t&b){
 	a.resize(nb);
 	std::uint64_t carry=0;
 	if(old_na!=0){
-		carry=mpn_add_n(a.data(),a.data(),b.data(),old_na);
+		carry=add_nn(a.data(),a.data(),b.data(),old_na);
 	}
 	carry=
-		mpn_add_1(a.data()+static_cast<std::ptrdiff_t>(old_na),
+		add_1n(a.data()+static_cast<std::ptrdiff_t>(old_na),
 				  b.data()+static_cast<std::ptrdiff_t>(old_na),nb-old_na,carry);
 	if(carry!=0){
 		a.push_back(carry);
@@ -1723,9 +1760,9 @@ inline void sub_abs_ip(limbs_t&a,const limbs_t&b){
 	if(b.empty())
 		return;
 	const std::uint64_t borrow=
-		mpn_sub(a.data(),a.data(),a.size(),b.data(),b.size());
+		sub_nm(a.data(),a.data(),a.size(),b.data(),b.size());
 	MINI_MP_ASSERT(borrow==0);
-	a.resize(mpn_nsize(a.data(),a.size()));
+	a.resize(lb_nz(a.data(),a.size()));
 }
 
 inline void add_one_ip(limbs_t&x){
@@ -1734,14 +1771,14 @@ inline void add_one_ip(limbs_t&x){
 		return;
 	}
 	x.reserve(x.size()+1);
-	const std::uint64_t carry=mpn_add_1(x.data(),x.data(),x.size(),1);
+	const std::uint64_t carry=add_1n(x.data(),x.data(),x.size(),1);
 	if(carry!=0)
 		x.push_back(carry);
 }
 
 inline limbs_t sub_one(limbs_t x){
 	MINI_MP_ASSERT(!x.empty());
-	const std::uint64_t borrow=mpn_sub_1(x.data(),x.data(),x.size(),1);
+	const std::uint64_t borrow=sub_1n(x.data(),x.data(),x.size(),1);
 	MINI_MP_ASSERT(borrow==0);
 	trim_lz(x);
 	return x;
@@ -2178,6 +2215,13 @@ inline void muladd_sm(limbs_t&x,std::uint32_t mul,std::uint32_t add){
 
 	std::uint64_t carry=add;
 	for(std::size_t i=0;i<x.size();++i){
+#if !MINI_MP_DETAIL_USE_MSVC_INTRIN
+		const unsigned __int128 z=
+			static_cast<unsigned __int128>(x[i])*
+			static_cast<std::uint64_t>(mul)+carry;
+		x[i]=static_cast<std::uint64_t>(z);
+		carry=static_cast<std::uint64_t>(z>>64);
+#else
 		const u128 p=mul_u64(x[i],static_cast<std::uint64_t>(mul));
 		std::uint64_t lo=0;
 		const std::uint64_t c1=addc_u64(0,p.lo,carry,&lo);
@@ -2187,6 +2231,44 @@ inline void muladd_sm(limbs_t&x,std::uint32_t mul,std::uint32_t add){
 		const std::uint64_t c2=addc_u64(0,p.hi,c1,&hi);
 		MINI_MP_ASSERT(c2==0);
 		carry=hi;
+#endif
+	}
+	if(carry!=0){
+		x.push_back(carry);
+	}
+}
+
+inline void muladd_lb(limbs_t&x,std::uint64_t mul,std::uint64_t add){
+	if(mul==0){
+		x.clear();
+		if(add!=0)
+			x.push_back(add);
+		return;
+	}
+	if(x.empty()){
+		if(add!=0)
+			x.push_back(add);
+		return;
+	}
+
+	std::uint64_t carry=add;
+	for(std::size_t i=0;i<x.size();++i){
+#if !MINI_MP_DETAIL_USE_MSVC_INTRIN
+		const unsigned __int128 z=
+			static_cast<unsigned __int128>(x[i])*mul+carry;
+		x[i]=static_cast<std::uint64_t>(z);
+		carry=static_cast<std::uint64_t>(z>>64);
+#else
+		const u128 p=mul_u64(x[i],mul);
+		std::uint64_t lo=0;
+		const std::uint64_t c1=addc_u64(0,p.lo,carry,&lo);
+		x[i]=lo;
+
+		std::uint64_t hi=0;
+		const std::uint64_t c2=addc_u64(0,p.hi,c1,&hi);
+		MINI_MP_ASSERT(c2==0);
+		carry=hi;
+#endif
 	}
 	if(carry!=0){
 		x.push_back(carry);
@@ -2217,6 +2299,10 @@ inline limbs_t div_limb(const limbs_t&x,std::uint64_t d,std::uint64_t*rem_out){
 	if(d==1){
 		*rem_out=0;
 		return x;
+	}
+	if(std::has_single_bit(d)){
+		*rem_out=x[0]&(d-1u);
+		return shr_bits(x,std::countr_zero(d));
 	}
 	if(x.size()==1){
 		const std::uint64_t v=x[0];
@@ -2256,6 +2342,11 @@ inline std::uint64_t div_limb_ip(limbs_t&x,std::uint64_t d){
 		return 0;
 	if(d==1)
 		return 0;
+	if(std::has_single_bit(d)){
+		const std::uint64_t rem=x[0]&(d-1u);
+		shr_ip(x,static_cast<unsigned>(std::countr_zero(d)));
+		return rem;
+	}
 	if(x.size()==1){
 		const std::uint64_t v=x[0];
 		const std::uint64_t q=v/d;
@@ -2293,6 +2384,8 @@ inline std::uint64_t mod_limb(const limbs_t&x,std::uint64_t d){
 		return 0;
 	if(d==1)
 		return 0;
+	if(std::has_single_bit(d))
+		return x[0]&(d-1u);
 	if(x.size()==1)
 		return x[0]%d;
 	if(x.size()==2){
@@ -2311,6 +2404,17 @@ inline std::uint64_t mod_limb(const limbs_t&x,std::uint64_t d){
 inline std::uint32_t mod_small(const limbs_t&x,std::uint32_t d){
 	return static_cast<std::uint32_t>(
 		mod_limb(x,static_cast<std::uint64_t>(d)));
+}
+
+template<std::size_t M>
+inline bool sqr_res_ok(std::uint32_t r){
+	static const std::array<unsigned char,M> tb=[](){
+		std::array<unsigned char,M> out{};
+		for(std::size_t i=0;i<M;++i)
+			out[(i*i)%M]=1;
+		return out;
+	}();
+	return tb[r%M]!=0;
 }
 
 inline std::uint32_t pow_u32(std::uint32_t base,std::size_t exp){
@@ -2333,6 +2437,381 @@ inline std::pair<std::uint32_t,std::size_t> chunk_par(std::uint32_t base){
 	if(len==0)
 		return {base,1};
 	return {static_cast<std::uint32_t>(mul),len};
+}
+
+inline std::pair<std::uint64_t,std::size_t>
+chunk_par_lb(std::uint32_t base){
+	MINI_MP_ASSERT(base>=2);
+	std::uint64_t mul=1;
+	std::size_t len=0;
+	const std::uint64_t maxv=std::numeric_limits<std::uint64_t>::max();
+	while(mul<=maxv/base){
+		mul*=base;
+		++len;
+	}
+	if(len==0)
+		return {base,1};
+	return {mul,len};
+}
+
+inline void mulbig_in(const limbs_t&a,const limbs_t&b,
+					  limbs_t&out);
+inline std::pair<limbs_t,limbs_t> dvmk_absl(const limbs_t&u,
+											const limbs_t&v);
+
+inline constexpr std::uint64_t kD10Base=10000000000000000000ULL;
+inline constexpr std::size_t kD10Len=19;
+
+inline bool prs_d10_chunks(std::string_view digits,
+						   std::vector<std::uint64_t>&chunks){
+	chunks.clear();
+	if(digits.empty())
+		return false;
+
+	auto prs_chunk=[&](std::size_t pos,std::size_t len,
+					   std::uint64_t*v)->bool{
+		std::uint64_t out_v=0;
+		for(std::size_t i=0;i<len;++i){
+			const char ch=digits[pos+i];
+			if(ch<'0'||ch>'9')
+				return false;
+			out_v=out_v*10u+
+				  static_cast<std::uint64_t>(ch-'0');
+		}
+		*v=out_v;
+		return true;
+	};
+
+	chunks.reserve((digits.size()+kD10Len-1u)/kD10Len);
+	std::size_t pos=0;
+	std::size_t first_len=digits.size()%kD10Len;
+	if(first_len==0)
+		first_len=kD10Len;
+
+	std::uint64_t v=0;
+	if(!prs_chunk(pos,first_len,&v))
+		return false;
+	chunks.push_back(v);
+	pos+=first_len;
+
+	while(pos<digits.size()){
+		if(!prs_chunk(pos,kD10Len,&v))
+			return false;
+		chunks.push_back(v);
+		pos+=kD10Len;
+	}
+	return true;
+}
+
+inline u128 d10_pair_val(std::uint64_t hi,std::uint64_t lo){
+	u128 v=mul_u64(hi,kD10Base);
+	std::uint64_t out=0;
+	const std::uint64_t cy=addc_u64(0,v.lo,lo,&out);
+	v.lo=out;
+	v.hi+=cy;
+	return v;
+}
+
+inline void set_u128(limbs_t&out,u128 v){
+	out.clear();
+	if(v.lo!=0||v.hi!=0)
+		out.push_back(v.lo);
+	if(v.hi!=0)
+		out.push_back(v.hi);
+}
+
+inline void muladd_d10_pair(limbs_t&x,std::uint64_t hi,
+							std::uint64_t lo){
+#if MINI_MP_DETAIL_USE_MSVC_INTRIN
+	muladd_lb(x,kD10Base,hi);
+	muladd_lb(x,kD10Base,lo);
+#else
+	const u128 add=d10_pair_val(hi,lo);
+	if(x.empty()){
+		set_u128(x,add);
+		return;
+	}
+	const u128 mul=mul_u64(kD10Base,kD10Base);
+	const std::uint64_t c0=mul.lo;
+	const std::uint64_t c1=mul.hi;
+	unsigned __int128 carry=add.lo;
+	for(std::size_t i=0;i<x.size();++i){
+		const std::uint64_t xi=x[i];
+		const unsigned __int128 term=
+			static_cast<unsigned __int128>(xi)*c0+carry;
+		x[i]=static_cast<std::uint64_t>(term);
+		carry=(term>>64)+static_cast<unsigned __int128>(xi)*c1;
+		if(i==0)
+			carry+=add.hi;
+	}
+	while(carry!=0){
+		x.push_back(static_cast<std::uint64_t>(carry));
+		carry>>=64;
+	}
+	trim_lz(x);
+#endif
+}
+
+inline bool prs_d10_seq(std::string_view digits,limbs_t&out){
+	out.clear();
+	if(digits.empty())
+		return false;
+
+	auto prs_chunk=[&](std::size_t pos,std::size_t len,
+					   std::uint64_t*v)->bool{
+		std::uint64_t out_v=0;
+		for(std::size_t i=0;i<len;++i){
+			const char ch=digits[pos+i];
+			if(ch<'0'||ch>'9')
+				return false;
+			out_v=out_v*10u+
+				  static_cast<std::uint64_t>(ch-'0');
+		}
+		*v=out_v;
+		return true;
+	};
+
+	out.reserve((digits.size()*3402u)/(64u*1024u)+2u);
+	const std::size_t chunk_count=(digits.size()+kD10Len-1u)/kD10Len;
+	std::size_t pos=0;
+	std::size_t first_len=digits.size()%kD10Len;
+	if(first_len==0)
+		first_len=kD10Len;
+
+	std::uint64_t v=0;
+	if(!prs_chunk(pos,first_len,&v))
+		return false;
+	pos+=first_len;
+	if((chunk_count&1u)!=0u){
+		if(v!=0)
+			out.push_back(v);
+	}else{
+		std::uint64_t lo=0;
+		if(!prs_chunk(pos,kD10Len,&lo))
+			return false;
+		pos+=kD10Len;
+		set_u128(out,d10_pair_val(v,lo));
+	}
+
+	while(pos<digits.size()){
+		std::uint64_t hi=0;
+		std::uint64_t lo=0;
+		if(!prs_chunk(pos,kD10Len,&hi))
+			return false;
+		pos+=kD10Len;
+		if(!prs_chunk(pos,kD10Len,&lo))
+			return false;
+		pos+=kD10Len;
+		muladd_d10_pair(out,hi,lo);
+	}
+	trim_lz(out);
+	return true;
+}
+
+inline void prs_d10_lin(const std::vector<std::uint64_t>&chunks,
+						std::size_t lo,std::size_t hi,limbs_t&out){
+	out.clear();
+	for(std::size_t i=lo;i<hi;++i)
+		muladd_lb(out,kD10Base,chunks[i]);
+	trim_lz(out);
+}
+
+inline void mk_d10_parse_pows(std::size_t chunks,
+							  std::vector<limbs_t>&pows){
+	pows.clear();
+	if(chunks<=1u)
+		return;
+	limbs_t base;
+	base.push_back(kD10Base);
+	pows.push_back(std::move(base));
+	while((std::size_t(1)<<pows.size())<chunks){
+		limbs_t sq;
+		mulbig_in(pows.back(),pows.back(),sq);
+		pows.push_back(std::move(sq));
+	}
+}
+
+inline void prs_d10_rec(const std::vector<std::uint64_t>&chunks,
+						std::size_t lo,std::size_t hi,
+						const std::vector<limbs_t>&pows,
+						std::size_t leaf,limbs_t&out){
+	const std::size_t n=hi-lo;
+	if(n==0){
+		out.clear();
+		return;
+	}
+	if(n<=leaf||n==1u){
+		prs_d10_lin(chunks,lo,hi,out);
+		return;
+	}
+
+	std::size_t low_n=std::bit_floor((n+1u)/2u);
+	if(low_n==0)
+		low_n=1;
+	const std::size_t mid=hi-low_n;
+	const unsigned lvl=std::countr_zero(low_n);
+
+	limbs_t hi_v;
+	limbs_t lo_v;
+	prs_d10_rec(chunks,lo,mid,pows,leaf,hi_v);
+	prs_d10_rec(chunks,mid,hi,pows,leaf,lo_v);
+
+	if(hi_v.empty()){
+		out=std::move(lo_v);
+		return;
+	}
+	limbs_t prod;
+	mulbig_in(hi_v,pows[lvl],prod);
+	add_abs_to(out,prod,lo_v);
+}
+
+inline bool prs_d10(std::string_view digits,limbs_t*out,
+					std::size_t leaf=
+						std::numeric_limits<std::size_t>::max()){
+	MINI_MP_ASSERT(out!=nullptr);
+	out->clear();
+	const std::size_t chunk_count=(digits.size()+kD10Len-1u)/kD10Len;
+	if(leaf==std::numeric_limits<std::size_t>::max()||
+	   chunk_count<leaf){
+		return prs_d10_seq(digits,*out);
+	}
+
+	std::vector<std::uint64_t> chunks;
+	if(!prs_d10_chunks(digits,chunks))
+		return false;
+	if(chunks.empty())
+		return true;
+
+	out->reserve((digits.size()*3402u)/(64u*1024u)+2u);
+
+	std::vector<limbs_t> pows;
+	mk_d10_parse_pows(chunks.size(),pows);
+	if(pows.empty()){
+		prs_d10_lin(chunks,0,chunks.size(),*out);
+		return true;
+	}
+	prs_d10_rec(chunks,0,chunks.size(),pows,leaf,*out);
+	trim_lz(*out);
+	return true;
+}
+
+inline void app_d10(std::string&out,std::uint64_t v){
+	if(v==0){
+		out.push_back('0');
+		return;
+	}
+	char buf[20];
+	std::size_t n=0;
+	while(v!=0){
+		const std::uint64_t q=v/10u;
+		buf[n++]=static_cast<char>('0'+(v-q*10u));
+		v=q;
+	}
+	while(n>0)
+		out.push_back(buf[--n]);
+}
+
+inline void app_d10_pad(std::string&out,std::uint64_t v){
+	char buf[kD10Len];
+	for(std::size_t i=0;i<kD10Len;++i){
+		const std::uint64_t q=v/10u;
+		buf[kD10Len-1u-i]=
+			static_cast<char>('0'+(v-q*10u));
+		v=q;
+	}
+	out.append(buf,buf+kD10Len);
+}
+
+inline void app_d10_zero(std::string&out,std::size_t chunks){
+	out.append(chunks*kD10Len,'0');
+}
+
+inline std::size_t d10_span(std::size_t lvl){
+	if(lvl>=std::numeric_limits<std::size_t>::digits)
+		throw_ovf("d10_span: size overflow");
+	return std::size_t(1)<<lvl;
+}
+
+inline void to_str_d10_bc(std::string&out,const limbs_t&x,bool pad,
+						  std::size_t span){
+	limbs_t tmp=x;
+	std::vector<std::uint64_t> chunks;
+	chunks.reserve(tmp.size()*2u+1u);
+	while(!tmp.empty())
+		chunks.push_back(div_limb_ip(tmp,kD10Base));
+	if(chunks.empty())
+		chunks.push_back(0);
+
+	if(pad){
+		if(span<chunks.size())
+			span=chunks.size();
+		app_d10_zero(out,span-chunks.size());
+		for(std::size_t i=chunks.size();i>0;--i)
+			app_d10_pad(out,chunks[i-1]);
+		return;
+	}
+
+	app_d10(out,chunks.back());
+	for(std::size_t i=chunks.size();i>1;--i)
+		app_d10_pad(out,chunks[i-2]);
+}
+
+inline void to_str_d10_rec(std::string&out,const limbs_t&x,
+						   const std::vector<limbs_t>&pows,
+						   std::size_t lvl,bool pad,
+						   std::size_t leaf){
+	if(lvl==0||x.size()<leaf){
+		to_str_d10_bc(out,x,pad,d10_span(lvl));
+		return;
+	}
+
+	const limbs_t&div=pows[lvl-1u];
+	auto qr=dvmk_absl(x,div);
+	const limbs_t&q=qr.first;
+	const limbs_t&r=qr.second;
+	if(!pad&&q.empty()){
+		to_str_d10_rec(out,r,pows,lvl-1u,false,leaf);
+		return;
+	}
+	to_str_d10_rec(out,q,pows,lvl-1u,pad,leaf);
+	to_str_d10_rec(out,r,pows,lvl-1u,true,leaf);
+}
+
+inline void mk_d10_pows(const limbs_t&x,std::vector<limbs_t>&pows){
+	pows.clear();
+	limbs_t base;
+	base.push_back(kD10Base);
+	pows.push_back(std::move(base));
+	while(cmp_abs(pows.back(),x)<=0){
+		limbs_t sq;
+		mulbig_in(pows.back(),pows.back(),sq);
+		pows.push_back(std::move(sq));
+	}
+}
+
+inline std::string to_str_d10(const limbs_t&x,int sign,std::size_t leaf){
+	if(x.empty())
+		return "0";
+
+	std::string out;
+	const std::size_t approx_digits=(bit_length(x)*1234u)/4096u+1u;
+	out.reserve(approx_digits+((sign<0)?1u:0u));
+	if(sign<0)
+		out.push_back('-');
+
+	if(x.size()<leaf){
+		to_str_d10_bc(out,x,false,0);
+		return out;
+	}
+
+	std::vector<limbs_t> pows;
+	mk_d10_pows(x,pows);
+	if(pows.size()<=1u){
+		to_str_d10_bc(out,x,false,0);
+		return out;
+	}
+	to_str_d10_rec(out,x,pows,pows.size()-1u,false,leaf);
+	return out;
 }
 
 inline int ch_to_dig(char c) noexcept;
@@ -2375,6 +2854,87 @@ inline std::uint64_t invodd264(std::uint64_t n) noexcept{
 		x*=(2u-n*x);
 	}
 	return x;
+}
+
+inline bool divex_lb(limbs_t&x,std::uint64_t d){
+	MINI_MP_ASSERT(d!=0);
+	if(x.empty()||d==1)
+		return true;
+	if((d&1u)==0u){
+		const unsigned sh=std::countr_zero(d);
+		const std::uint64_t mask=(std::uint64_t(1)<<sh)-1u;
+		if((x[0]&mask)!=0u)
+			return false;
+		shr_ip(x,sh);
+		d>>=sh;
+		if(d==1)
+			return true;
+	}
+
+	const std::uint64_t inv=invodd264(d);
+	std::uint64_t carry=0;
+	for(std::size_t i=0;i<x.size();++i){
+		std::uint64_t lo=0;
+		const std::uint64_t borrow=subb_u64(0,x[i],carry,&lo);
+		const std::uint64_t q=lo*inv;
+		const u128 p=mul_u64(q,d);
+		MINI_MP_ASSERT(p.lo==lo);
+		std::uint64_t next=0;
+		const std::uint64_t cy=addc_u64(0,p.hi,borrow,&next);
+		MINI_MP_ASSERT(cy==0);
+		x[i]=q;
+		carry=next;
+	}
+	if(carry!=0)
+		return false;
+	trim_lz(x);
+	return true;
+}
+
+inline bool divex_odd(const limbs_t&num,const limbs_t&den,limbs_t&out){
+	MINI_MP_ASSERT(!den.empty());
+	MINI_MP_ASSERT((den[0]&1u)!=0u);
+	out.clear();
+	if(num.empty())
+		return true;
+	if(cmp_abs(num,den)<0)
+		return false;
+	if(den.size()==1){
+		out=num;
+		return divex_lb(out,den[0]);
+	}
+
+	const std::size_t qn=num.size()-den.size()+1u;
+	limbs_t rem=num;
+	rem.push_back(0);
+	out.resize(qn,0);
+
+	const std::uint64_t inv=invodd264(den[0]);
+	for(std::size_t i=0;i<qn;++i){
+		const std::uint64_t q=rem[i]*inv;
+		out[i]=q;
+		if(q!=0){
+			std::uint64_t cy=sm_1n(
+				rem.data()+static_cast<std::ptrdiff_t>(i),
+				den.data(),den.size(),q);
+			std::size_t k=i+den.size();
+			while(cy!=0&&k<rem.size()){
+				std::uint64_t v=0;
+				cy=subb_u64(0,rem[k],cy,&v);
+				rem[k]=v;
+				++k;
+			}
+			if(cy!=0)
+				return false;
+		}
+		MINI_MP_ASSERT(rem[i]==0);
+	}
+	for(std::size_t i=qn;i<rem.size();++i){
+		if(rem[i]!=0)
+			return false;
+	}
+	trim_lz(out);
+	return true;
 }
 
 struct Mont64Ctx{
@@ -2783,13 +3343,13 @@ inline limbs_t mulsbk_ab(const limbs_t&a,const limbs_t&b){
 	const std::size_t vn=vp->size();
 
 	limbs_t out(un+vn,0);
-	out[un]=mpn_mul_1(out.data(),up->data(),un,(*vp)[0]);
+	out[un]=mul_1n(out.data(),up->data(),un,(*vp)[0]);
 	for(std::size_t j=1;j<vn;++j){
-		const std::uint64_t cy=mpn_adm1(
+		const std::uint64_t cy=am_1n(
 			out.data()+static_cast<std::ptrdiff_t>(j),up->data(),un,(*vp)[j]);
 		out[j+un]=cy;
 	}
-	out.resize(mpn_nsize(out.data(),un+vn));
+	out.resize(lb_nz(out.data(),un+vn));
 	return out;
 }
 
@@ -2811,13 +3371,13 @@ inline void mulsbk_in(const limbs_t&a,const limbs_t&b,
 	const std::size_t vn=vp->size();
 	const std::size_t need=un+vn;
 	out.assign(need,0);
-	out[un]=mpn_mul_1(out.data(),up->data(),un,(*vp)[0]);
+	out[un]=mul_1n(out.data(),up->data(),un,(*vp)[0]);
 	for(std::size_t j=1;j<vn;++j){
-		const std::uint64_t cy=mpn_adm1(
+		const std::uint64_t cy=am_1n(
 			out.data()+static_cast<std::ptrdiff_t>(j),up->data(),un,(*vp)[j]);
 		out[j+un]=cy;
 	}
-	out.resize(mpn_nsize(out.data(),need));
+	out.resize(lb_nz(out.data(),need));
 }
 
 inline limbs_t sqrsbk_ab(const limbs_t&x){
@@ -3042,8 +3602,8 @@ inline void mulbl_in(const limbs_t&a,std::uint64_t m,limbs_t&out){
 
 	const std::size_t n=a.size();
 	out.resize_uninit(n+1);
-	out[n]=mpn_mul_1(out.data(),a.data(),n,m);
-	out.resize(mpn_nsize(out.data(),n+1));
+	out[n]=mul_1n(out.data(),a.data(),n,m);
+	out.resize(lb_nz(out.data(),n+1));
 }
 
 inline limbs_t mul_bylb(const limbs_t&a,std::uint64_t m){
@@ -3164,13 +3724,13 @@ inline std::pair<std::uint64_t,limbs_t> dvm1q_absl(const limbs_t&u,
 		rhat_ovf=addc_u64(0,rhat,vn[n-1],&rhat);
 	}
 
-	const std::uint64_t cy=mpn_sbm1(un.data(),vn.data(),n,qhat);
+	const std::uint64_t cy=sm_1n(un.data(),vn.data(),n,qhat);
 	std::uint64_t top=0;
 	const std::uint64_t borrow=subb_u64(0,un[n],cy,&top);
 	un[n]=top;
 	if(borrow!=0){
 		--qhat;
-		const std::uint64_t carry=mpn_add_n(un.data(),un.data(),vn.data(),n);
+		const std::uint64_t carry=add_nn(un.data(),un.data(),vn.data(),n);
 		std::uint64_t out=0;
 		const std::uint64_t ctop=addc_u64(0,un[n],carry,&out);
 		MINI_MP_ASSERT(ctop==0);
@@ -3369,7 +3929,7 @@ inline void modk_liip(limbs_t&u,const limbs_t&v,
 			}
 		}
 
-		const std::uint64_t cy=mpn_sbm1(
+		const std::uint64_t cy=sm_1n(
 			un.data()+static_cast<std::ptrdiff_t>(j),vn.data(),n,qhat);
 		std::uint64_t outn=0;
 		const std::uint64_t borrow_out=subb_u64(0,un[j+n],cy,&outn);
@@ -3377,7 +3937,7 @@ inline void modk_liip(limbs_t&u,const limbs_t&v,
 
 		if(borrow_out!=0){
 			const std::uint64_t carry=
-				mpn_add_n(un.data()+static_cast<std::ptrdiff_t>(j),
+				add_nn(un.data()+static_cast<std::ptrdiff_t>(j),
 						  un.data()+static_cast<std::ptrdiff_t>(j),vn.data(),n);
 			std::uint64_t top=0;
 			const std::uint64_t ctop=addc_u64(0,un[j+n],carry,&top);
@@ -3918,6 +4478,7 @@ inline std::string_view trim_ws(std::string_view sv) noexcept{
 
 inline constexpr std::size_t kKarTh=384;
 inline constexpr std::size_t kNttDef=256;
+inline constexpr std::size_t kNttBitsDef=24;
 inline constexpr std::size_t kNttOff=
 	std::numeric_limits<std::size_t>::max();
 inline constexpr std::size_t kKarImb=4;
@@ -3933,8 +4494,13 @@ inline constexpr std::size_t kFacTreeDef=192;
 inline constexpr std::size_t kBinomTreeDef=160;
 inline constexpr std::size_t kPowW5Def=384;
 inline constexpr std::size_t kPowW6Def=1536;
+inline constexpr std::size_t kD10DcDef=kNttOff;
+inline constexpr std::size_t kD10PrsDef=kNttOff;
+inline constexpr std::size_t kT3Def=kNttOff;
 
 inline std::size_t tun_ntt() noexcept;
+inline std::size_t tun_ntt_sq() noexcept;
+inline std::size_t tun_ntt_bits() noexcept;
 inline std::size_t tun_krec() noexcept;
 inline std::size_t tun_kar() noexcept;
 inline std::size_t tun_kar_imb() noexcept;
@@ -3950,6 +4516,9 @@ inline std::size_t tun_fac_tree() noexcept;
 inline std::size_t tun_binom_tree() noexcept;
 inline std::size_t tun_pow_w5() noexcept;
 inline std::size_t tun_pow_w6() noexcept;
+inline std::size_t tun_d10_dc() noexcept;
+inline std::size_t tun_d10_prs() noexcept;
+inline std::size_t tun_t3() noexcept;
 inline void ensure_at();
 
 } 
@@ -3963,17 +4532,20 @@ inline BigInt factorial_tree(std::uint64_t n,std::size_t leaf);
 inline BigInt binomial_loop(std::uint64_t n,std::uint64_t k);
 inline BigInt binomial_tree(std::uint64_t n,std::uint64_t k,
 							std::size_t leaf);
+inline std::uint64_t bench_sqr_mul(const BigInt&a,int loops,bool use_ntt);
 }
 
 struct ExtGcdRes;
 
 inline BigInt mul_sbk(const BigInt&a,const BigInt&b);
 inline BigInt mul_kar(const BigInt&a,const BigInt&b);
+inline BigInt mul_t3(const BigInt&a,const BigInt&b);
 inline BigInt mul_ntt(const BigInt&a,const BigInt&b);
 inline BigInt mul_disp(const BigInt&a,const BigInt&b);
 inline BigInt sqr_disp(const BigInt&a);
 
 inline std::pair<BigInt,BigInt> dvm_simp(const BigInt&a,const BigInt&b);
+inline std::pair<BigInt,BigInt> dvm_p2(const BigInt&a,const BigInt&b);
 inline std::pair<BigInt,BigInt> dvm_knuth(const BigInt&a,const BigInt&b);
 inline std::pair<BigInt,BigInt> divmod(const BigInt&a,const BigInt&b);
 inline BigInt divk_q(const BigInt&a,const BigInt&b);
@@ -4113,20 +4685,28 @@ class BigInt{
 			}
 			return from_raw(sign,std::move(mag));
 		}
+		if(base==10){
+			if(digits.size()>=512u)
+				detail::ensure_at();
+			if(!detail::prs_d10(digits,&mag,detail::tun_d10_prs())){
+				detail::throw_inv("BigInt::parse: invalid digit");
+			}
+			return from_raw(sign,std::move(mag));
+		}
 
 		const auto [chunk_mul,chunk_len]=
-			detail::chunk_par(static_cast<std::uint32_t>(base));
+			detail::chunk_par_lb(static_cast<std::uint32_t>(base));
 
-		auto prs_chunk=[&](std::size_t pos,std::size_t len) -> std::uint32_t{
-			std::uint32_t v=0;
+		auto prs_chunk=[&](std::size_t pos,std::size_t len) -> std::uint64_t{
+			std::uint64_t v=0;
 			for(std::size_t j=0;j<len;++j){
 				const int d=detail::ch_to_dig(text[pos+j]);
 				if(d<0||d>=base){
 					detail::throw_inv(
 						"BigInt::parse: invalid digit");
 				}
-				v=static_cast<std::uint32_t>(v*static_cast<std::uint32_t>(base)+
-											 d);
+				v=v*static_cast<std::uint32_t>(base)+
+				  static_cast<std::uint32_t>(d);
 			}
 			return v;
 		};
@@ -4136,14 +4716,14 @@ class BigInt{
 		if(first_len==0)
 			first_len=chunk_len;
 
-		const std::uint32_t first_v=prs_chunk(pos,first_len);
+		const std::uint64_t first_v=prs_chunk(pos,first_len);
 		if(first_v!=0)
 			mag.push_back(first_v);
 		pos+=first_len;
 
 		while(pos<digit_end){
-			const std::uint32_t v=prs_chunk(pos,chunk_len);
-			detail::muladd_sm(mag,chunk_mul,v);
+			const std::uint64_t v=prs_chunk(pos,chunk_len);
+			detail::muladd_lb(mag,chunk_mul,v);
 			pos+=chunk_len;
 		}
 
@@ -4163,15 +4743,21 @@ class BigInt{
 		   base<=32){
 			return detail::to_str_p2(limbs_,sign_,base);
 		}
+		if(base==10){
+			if(limbs_.size()>=64u)
+				detail::ensure_at();
+			return detail::to_str_d10(
+				limbs_,sign_,detail::tun_d10_dc());
+		}
 
 		detail::limbs_t tmp=limbs_;
 		const auto [chunk_mul,chunk_len]=
-			detail::chunk_par(static_cast<std::uint32_t>(base));
+			detail::chunk_par_lb(static_cast<std::uint32_t>(base));
 
-		std::vector<std::uint32_t> chunks;
+		std::vector<std::uint64_t> chunks;
 		chunks.reserve(tmp.size()*3);
 		while(!tmp.empty()){
-			chunks.push_back(detail::div_small(tmp,chunk_mul));
+			chunks.push_back(detail::div_limb_ip(tmp,chunk_mul));
 		}
 		MINI_MP_ASSERT(!chunks.empty());
 
@@ -4179,16 +4765,19 @@ class BigInt{
 		if(sign_<0)
 			out.push_back('-');
 
-		auto appch_npd=[&](std::uint32_t v){
+		auto appch_npd=[&](std::uint64_t v){
 			if(v==0){
 				out.push_back('0');
 				return;
 			}
-			char buf[32];
+			char buf[64];
 			std::size_t n=0;
 			while(v!=0){
-				const std::uint32_t d=v%static_cast<std::uint32_t>(base);
-				v/=static_cast<std::uint32_t>(base);
+				const std::uint64_t q=v/static_cast<std::uint32_t>(base);
+				const std::uint32_t d=
+					static_cast<std::uint32_t>(
+						v-q*static_cast<std::uint32_t>(base));
+				v=q;
 				buf[n++]=detail::dig_to_ch(d);
 			}
 			while(n>0){
@@ -4196,12 +4785,15 @@ class BigInt{
 			}
 		};
 
-		auto appch_pad=[&](std::uint32_t v){
-			char buf[32];
+		auto appch_pad=[&](std::uint64_t v){
+			char buf[64];
 			MINI_MP_ASSERT(chunk_len<sizeof(buf));
 			for(std::size_t i=0;i<chunk_len;++i){
-				const std::uint32_t d=v%static_cast<std::uint32_t>(base);
-				v/=static_cast<std::uint32_t>(base);
+				const std::uint64_t q=v/static_cast<std::uint32_t>(base);
+				const std::uint32_t d=
+					static_cast<std::uint32_t>(
+						v-q*static_cast<std::uint32_t>(base));
+				v=q;
 				buf[chunk_len-1-i]=detail::dig_to_ch(d);
 			}
 			out.append(buf,buf+chunk_len);
@@ -4562,11 +5154,13 @@ class BigInt{
 
 	friend BigInt mul_sbk(const BigInt&a,const BigInt&b);
 	friend BigInt mul_kar(const BigInt&a,const BigInt&b);
+	friend BigInt mul_t3(const BigInt&a,const BigInt&b);
 	friend BigInt mul_ntt(const BigInt&a,const BigInt&b);
 	friend BigInt mul_disp(const BigInt&a,const BigInt&b);
 	friend BigInt sqr_disp(const BigInt&a);
 	friend std::pair<BigInt,BigInt> dvm_simp(const BigInt&a,
 												  const BigInt&b);
+	friend std::pair<BigInt,BigInt> dvm_p2(const BigInt&a,const BigInt&b);
 	friend std::pair<BigInt,BigInt> dvm_knuth(const BigInt&a,const BigInt&b);
 	friend std::pair<BigInt,BigInt> divmod(const BigInt&a,const BigInt&b);
 	friend BigInt divk_q(const BigInt&a,const BigInt&b);
@@ -4577,11 +5171,13 @@ class BigInt{
 	friend BigInt gcd_hlprm(BigInt a,BigInt b,
 											  std::size_t hl_min,
 											  std::size_t hl_rnd);
+	friend BigInt lcm(const BigInt&a,const BigInt&b);
 	friend void mkodd_ip(BigInt&x);
 	friend BigInt gcd_sm_bin(BigInt a,BigInt b);
 	friend BigInt modpow(BigInt base,BigInt exp,const BigInt&mod);
 	friend bool invert(BigInt*rop,const BigInt&a,const BigInt&mod);
 	friend BigInt divexact(const BigInt&a,const BigInt&b);
+	friend bool is_square(const BigInt&n);
 	friend BigInt factorial(std::uint64_t n);
 	friend BigInt binomial(std::uint64_t n,std::uint64_t k);
 	friend BigInt detail::factorial_loop(std::uint64_t n);
@@ -4589,6 +5185,8 @@ class BigInt{
 	friend BigInt detail::binomial_loop(std::uint64_t n,std::uint64_t k);
 	friend BigInt detail::binomial_tree(std::uint64_t n,std::uint64_t k,
 										 std::size_t leaf);
+	friend std::uint64_t detail::bench_sqr_mul(const BigInt&a,int loops,
+											   bool use_ntt);
 	friend BigInt operator+(const BigInt&a,const BigInt&b);
 	friend BigInt operator-(const BigInt&a,const BigInt&b);
 	friend BigInt operator<<(const BigInt&v,std::size_t bits);
@@ -4854,6 +5452,66 @@ inline BigInt mul_kar(const BigInt&a,const BigInt&b){
 	return BigInt::from_raw(sign,mag);
 }
 
+inline BigInt mul_t3(const BigInt&a,const BigInt&b){
+	if(a.is_zero()||b.is_zero())
+		return BigInt();
+	const std::size_t an=a.limbs_.size();
+	const std::size_t bn=b.limbs_.size();
+	const std::size_t n=std::max(an,bn);
+	const std::size_t m=(n+2u)/3u;
+	if(m==0||std::min(an,bn)<=2u*m)
+		return mul_kar(a,b);
+
+	auto part=[](const detail::limbs_t&x,std::size_t lo,
+				 std::size_t hi)->BigInt{
+		detail::limbs_t p=detail::slc_limb(x,lo,hi);
+		return BigInt::from_raw(p.empty()?0:1,std::move(p));
+	};
+
+	const BigInt a0=part(a.limbs_,0,m);
+	const BigInt a1=part(a.limbs_,m,2u*m);
+	const BigInt a2=part(a.limbs_,2u*m,an);
+	const BigInt b0=part(b.limbs_,0,m);
+	const BigInt b1=part(b.limbs_,m,2u*m);
+	const BigInt b2=part(b.limbs_,2u*m,bn);
+	if(a2.is_zero()||b2.is_zero())
+		return mul_kar(a,b);
+
+	const BigInt ax1=a0+a1+a2;
+	const BigInt bx1=b0+b1+b2;
+	const BigInt axm1=a0-a1+a2;
+	const BigInt bxm1=b0-b1+b2;
+	const BigInt axm2=a0-(a1<<1)+(a2<<2);
+	const BigInt bxm2=b0-(b1<<1)+(b2<<2);
+
+	const BigInt w0=mul_kar(a0,b0);
+	const BigInt w1=mul_kar(ax1,bx1);
+	const BigInt wm1=mul_kar(axm1,bxm1);
+	const BigInt wm2=mul_kar(axm2,bxm2);
+	const BigInt wi=mul_kar(a2,b2);
+
+	const BigInt two(2);
+	const BigInt three(3);
+	const BigInt c0=w0;
+	const BigInt c4=wi;
+	BigInt c1=divexact(w1-wm1,two);
+	BigInt c2=wm1-c0;
+	BigInt c3=divexact(wm2-w1,three);
+	c3=divexact(c2-c3,two)+(c4<<1);
+	c2=c2+c1-c4;
+	c1-=c3;
+
+	const std::size_t sh=m*64u;
+	BigInt out=c0;
+	out+=c1<<sh;
+	out+=c2<<(2u*sh);
+	out+=c3<<(3u*sh);
+	out+=c4<<(4u*sh);
+	if(a.sign_!=b.sign_)
+		out=-out;
+	return out;
+}
+
 #if MINI_MP_ENABLE_NTT
 namespace detail::ntt{
 
@@ -4869,7 +5527,7 @@ inline constexpr std::array<NTTPrime,3> kPrimes={{
 	{469762049u,3u},  
 }};
 
-inline constexpr unsigned kDigitBits=15; 
+inline constexpr unsigned kDigitBits=static_cast<unsigned>(kNttBitsDef);
 
 inline std::size_t next_pow2(std::size_t n){
 	std::size_t p=1;
@@ -5419,9 +6077,9 @@ inline BigInt mul_ntt(const BigInt&a,const BigInt&b){
 	if(a.is_zero()||b.is_zero())
 		return BigInt();
 
-	constexpr unsigned kBits=detail::ntt::kDigitBits;
-	constexpr std::uint64_t kDigitMax=(std::uint64_t(1)<<kBits)-1u;
-	constexpr std::uint64_t kDigMaxS=kDigitMax*kDigitMax;
+	const unsigned kBits=static_cast<unsigned>(detail::tun_ntt_bits());
+	const std::uint64_t kDigitMax=(std::uint64_t(1)<<kBits)-1u;
+	const std::uint64_t kDigMaxS=kDigitMax*kDigitMax;
 	
 	
 	
@@ -5510,6 +6168,11 @@ inline BigInt mul_disp(const BigInt&a,const BigInt&b){
 		return mul_ntt(a,b);
 	}
 #endif
+	const std::size_t t3_thr=detail::tun_t3();
+	if(t3_thr!=detail::kNttOff&&nmin>=t3_thr&&
+	   nmax<=nmin+nmin/2u){
+		return mul_t3(a,b);
+	}
 	if(nmin>=kar_thr&&nmax<=nmin*detail::tun_kar_imb()){
 		return mul_kar(a,b);
 	}
@@ -5524,7 +6187,7 @@ inline BigInt sqr_disp(const BigInt&a){
 	const std::size_t kar_thr=detail::tun_kar();
 
 #if MINI_MP_ENABLE_NTT
-	const std::size_t ntt_thr=detail::tun_ntt();
+	const std::size_t ntt_thr=detail::tun_ntt_sq();
 	if(ntt_thr!=detail::kNttOff&&n>=ntt_thr){
 		return mul_ntt(a,a);
 	}
@@ -5552,6 +6215,22 @@ inline std::pair<BigInt,BigInt> dvm_ablb(const BigInt&abs_a,limb_t d){
 	return {std::move(quot),std::move(r)};
 }
 
+inline std::pair<BigInt,BigInt> dvm_p2(const BigInt&a,const BigInt&b){
+	MINI_MP_ASSERT(!b.is_zero());
+	MINI_MP_ASSERT(detail::pow2_abs(b.limbs_));
+	if(a.is_zero())
+		return {BigInt(),BigInt()};
+
+	const std::size_t sh=detail::pow2_exp_abs(b.limbs_);
+	detail::limbs_t qmag=detail::shr_bits(a.limbs_,sh);
+	detail::limbs_t rmag=detail::low_bits_abs(a.limbs_,sh);
+
+	const int qsign=qmag.empty()?0:((a.sign_==b.sign_)?1:-1);
+	BigInt q=BigInt::from_raw(qsign,std::move(qmag));
+	BigInt r=BigInt::from_raw(rmag.empty()?0:a.sign_,std::move(rmag));
+	return {std::move(q),std::move(r)};
+}
+
 inline std::pair<BigInt,BigInt> dvm_simp(const BigInt&a,const BigInt&b){
 	if(b.is_zero()){
 		detail::throw_dom("dvm_simp: division by zero");
@@ -5559,6 +6238,8 @@ inline std::pair<BigInt,BigInt> dvm_simp(const BigInt&a,const BigInt&b){
 	if(a.is_zero()){
 		return {BigInt(),BigInt()};
 	}
+	if(detail::pow2_abs(b.limbs_))
+		return dvm_p2(a,b);
 
 	const BigInt abs_a=a.abs();
 	const BigInt abs_b=b.abs();
@@ -5616,6 +6297,8 @@ inline std::pair<BigInt,BigInt> dvm_knuth(const BigInt&a,const BigInt&b){
 			q.sign_=-q.sign_;
 		return {std::move(q),BigInt()};
 	}
+	if(detail::pow2_abs(vb))
+		return dvm_p2(a,b);
 	if(ua.size()==1&&vb.size()==1){
 		const std::uint64_t qv=ua[0]/vb[0];
 		const std::uint64_t rv=ua[0]%vb[0];
@@ -5698,6 +6381,8 @@ inline BigInt divk_q(const BigInt&a,const BigInt&b){
 			q.sign_=-q.sign_;
 		return q;
 	}
+	if(detail::pow2_abs(vb))
+		return dvm_p2(a,b).first;
 	if(ua.size()==1&&vb.size()==1){
 		const std::uint64_t qv=ua[0]/vb[0];
 		if(qv==0)
@@ -5765,6 +6450,8 @@ inline BigInt divk_r(const BigInt&a,const BigInt&b){
 	const detail::limbs_t&vb=b.limbs_;
 	if(vb.size()==1&&vb[0]==1)
 		return BigInt();
+	if(detail::pow2_abs(vb))
+		return dvm_p2(a,b).second;
 	if(ua.size()==1&&vb.size()==1){
 		const std::uint64_t rem=ua[0]%vb[0];
 		if(rem==0)
@@ -5819,6 +6506,8 @@ namespace detail{
 
 struct ATState{
 	std::size_t ntt_th=kNttDef;
+	std::size_t ntt_sq_th=kNttDef;
+	std::size_t ntt_bits=kNttBitsDef;
 	std::size_t kar_rec=kKarRecB;
 	std::size_t kar_th=kKarTh;
 	std::size_t kar_imb=kKarImb;
@@ -5834,6 +6523,9 @@ struct ATState{
 	std::size_t binom_tree=kBinomTreeDef;
 	std::size_t pow_w5=kPowW5Def;
 	std::size_t pow_w6=kPowW6Def;
+	std::size_t d10_dc=kD10DcDef;
+	std::size_t d10_prs=kD10PrsDef;
+	std::size_t t3_th=kT3Def;
 };
 
 inline ATState&at_state() noexcept{
@@ -5930,6 +6622,67 @@ inline std::uint64_t bench_mul(const BigInt&a,const BigInt&b,
 		std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count());
 }
 
+inline std::uint64_t bench_t3(const BigInt&a,const BigInt&b,int loops){
+	volatile std::size_t sink=0;
+	const auto t0=std::chrono::steady_clock::now();
+	for(int i=0;i<loops;++i){
+		BigInt c=mul_t3(a,b);
+		sink^=c.bit_length();
+	}
+	const auto t1=std::chrono::steady_clock::now();
+	(void)sink;
+	return static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count());
+}
+
+inline std::uint64_t bench_sqr_mul(const BigInt&a,int loops,bool use_ntt){
+	volatile std::size_t sink=0;
+	const auto t0=std::chrono::steady_clock::now();
+	for(int i=0;i<loops;++i){
+		if(use_ntt){
+			BigInt c=mul_ntt(a,a);
+			sink^=c.bit_length();
+		}else{
+			limbs_t mag=sqrkar_ab(a.limbs_);
+			sink^=bit_length(mag);
+		}
+	}
+	const auto t1=std::chrono::steady_clock::now();
+	(void)sink;
+	return static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count());
+}
+
+inline std::uint64_t bench_fmt_d10(const limbs_t&x,int loops,
+								   std::size_t leaf){
+	volatile std::size_t sink=0;
+	const auto t0=std::chrono::steady_clock::now();
+	for(int i=0;i<loops;++i){
+		std::string s=to_str_d10(x,1,leaf);
+		sink^=s.size();
+	}
+	const auto t1=std::chrono::steady_clock::now();
+	(void)sink;
+	return static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count());
+}
+
+inline std::uint64_t bench_prs_d10(std::string_view s,int loops,
+								   std::size_t leaf){
+	volatile std::size_t sink=0;
+	const auto t0=std::chrono::steady_clock::now();
+	for(int i=0;i<loops;++i){
+		limbs_t x;
+		const bool ok=prs_d10(s,&x,leaf);
+		MINI_MP_ASSERT(ok);
+		sink^=x.size();
+	}
+	const auto t1=std::chrono::steady_clock::now();
+	(void)sink;
+	return static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count());
+}
+
 inline limbs_t mk_limb_bench(std::uint64_t&seed,std::size_t limbs){
 	limbs_t out(limbs);
 	for(std::size_t i=0;i<limbs;++i)
@@ -5973,6 +6726,25 @@ inline BigInt prod_u64_range(std::uint64_t lo,std::uint64_t hi){
 	return prod_u64_range_leaf(lo,hi,tun_prod_leaf());
 }
 
+inline BigInt prod_odd_leaf(std::uint64_t lo,std::uint64_t hi,
+							std::size_t leaf){
+	if(lo>hi)
+		return BigInt(1);
+	if((lo&1u)==0u)
+		++lo;
+	if(lo>hi)
+		return BigInt(1);
+	if(hi-lo<=leaf*2u){
+		BigInt out(1);
+		for(std::uint64_t i=lo;i<=hi;i+=2u)
+			out*=BigInt::from_u64(i);
+		return out;
+	}
+	const std::uint64_t mid=lo+(hi-lo)/2u;
+	return prod_odd_leaf(lo,mid,leaf)*
+		   prod_odd_leaf(mid+1u,hi,leaf);
+}
+
 inline BigInt factorial_loop(std::uint64_t n){
 	BigInt out(1);
 	limbs_t tmp;
@@ -5985,7 +6757,13 @@ inline BigInt factorial_loop(std::uint64_t n){
 }
 
 inline BigInt factorial_tree(std::uint64_t n,std::size_t leaf){
-	return prod_u64_range_leaf(2,n,leaf);
+	BigInt odd(1);
+	for(std::uint64_t m=n;m>1u;m>>=1u)
+		odd*=prod_odd_leaf(3u,m,leaf);
+	const std::uint64_t twos=n-std::popcount(n);
+	if(twos!=0u)
+		odd<<=static_cast<std::size_t>(twos);
+	return odd;
 }
 
 inline BigInt binomial_loop(std::uint64_t n,std::uint64_t k){
@@ -6041,6 +6819,8 @@ inline std::uint64_t bench_binom(std::uint64_t n,std::uint64_t k,int loops,
 inline void at_impl(){
 	ATState tuned{};
 	tuned.ntt_th=kNttOff;
+	tuned.ntt_sq_th=kNttOff;
+	tuned.ntt_bits=kNttBitsDef;
 	tuned.kar_rec=kKarRecB;
 	tuned.kar_th=kKarTh;
 	tuned.kar_imb=kKarImb;
@@ -6056,6 +6836,9 @@ inline void at_impl(){
 	tuned.binom_tree=kBinomTreeDef;
 	tuned.pow_w5=kPowW5Def;
 	tuned.pow_w6=kPowW6Def;
+	tuned.d10_dc=kD10DcDef;
+	tuned.d10_prs=kD10PrsDef;
+	tuned.t3_th=kT3Def;
 	at_state()=tuned;
 
 	{
@@ -6165,46 +6948,192 @@ inline void at_impl(){
 		at_state().kar_imb=best_imb;
 	}
 
+	{
+		std::uint64_t seed=0xf1357aea5151d00dULL;
+		constexpr std::array<std::size_t,5> kT3Cand={
+			384u,512u,640u,768u,1024u};
+		struct T3Smp{
+			BigInt a;
+			BigInt b;
+			std::size_t n=0;
+			std::uint64_t kar_ns=0;
+			std::uint64_t t3_ns=0;
+		};
+		std::vector<T3Smp> samples;
+		samples.reserve(kT3Cand.size());
+		for(std::size_t n : kT3Cand){
+			if(n<tuned.kar_th)
+				continue;
+			T3Smp s{};
+			s.n=n;
+			s.a=mk_bench(seed,n);
+			s.b=mk_bench(seed,n);
+			const int loops=(n<=512u)?2:1;
+			const std::uint64_t loop_n=static_cast<std::uint64_t>(loops);
+			s.kar_ns=(bench_mul(s.a,s.b,loops,false)+loop_n/2u)/loop_n;
+			s.t3_ns=(bench_t3(s.a,s.b,loops)+loop_n/2u)/loop_n;
+			MINI_MP_ASSERT(mul_kar(s.a,s.b)==mul_t3(s.a,s.b));
+			samples.push_back(std::move(s));
+		}
+
+		std::uint64_t off_cost=0;
+		for(const auto&s : samples)
+			off_cost+=s.kar_ns;
+		std::uint64_t best_cost=off_cost;
+		std::size_t best_th=kNttOff;
+		for(std::size_t th : kT3Cand){
+			bool used=false;
+			bool ok=true;
+			std::uint64_t cost=0;
+			for(const auto&s : samples){
+				if(s.n>=th){
+					used=true;
+					if(s.t3_ns>s.kar_ns){
+						ok=false;
+						break;
+					}
+					cost+=s.t3_ns;
+				}else{
+					cost+=s.kar_ns;
+				}
+			}
+			if(ok&&used&&cost*std::uint64_t(100)<best_cost*std::uint64_t(99)){
+				best_cost=cost;
+				best_th=th;
+			}
+		}
+		tuned.t3_th=best_th;
+		at_state().t3_th=best_th;
+	}
+
 #if MINI_MP_ENABLE_NTT
 	{
 		std::uint64_t seed=0x9e3779b97f4a7c15ULL;
+		constexpr std::array<std::size_t,7> kBitsCand={
+			15u,18u,21u,23u,24u,25u,26u};
 		constexpr std::array<std::size_t,10> kNttCand={
-			96u,128u,160u,192u,224u,256u,320u,384u,512u,640u};
-		bool prev_win=false;
-		std::size_t prev_n=0;
+			192u,256u,320u,384u,512u,640u,768u,1024u,1280u,1536u};
+		struct NttSmp{
+			BigInt a;
+			BigInt b;
+			std::size_t n=0;
+			std::uint64_t mul_base_ns=0;
+			std::uint64_t sqr_base_ns=0;
+			std::array<std::uint64_t,kBitsCand.size()> mul_ntt_ns{};
+			std::array<std::uint64_t,kBitsCand.size()> sqr_ntt_ns{};
+		};
+		std::vector<NttSmp> samples;
+		samples.reserve(kNttCand.size());
 		for(std::size_t n : kNttCand){
 			if(n<tuned.kar_th)
 				continue;
-			const BigInt a=mk_bench(seed,n);
-			const BigInt b=mk_bench(seed,n);
-			const int loops=(n<=128u)?4:(n<=224u)?3:(n<=384u)?2:1;
-
-			const std::uint64_t t_kar=bench_mul(a,b,loops,false);
-			const std::uint64_t t_ntt=bench_mul(a,b,loops,true);
-			const bool win=(t_ntt*100u<=t_kar*98u);
-			if(win&&prev_win){
-				tuned.ntt_th=prev_n;
-				break;
+			NttSmp s{};
+			s.n=n;
+			s.a=mk_bench(seed,n);
+			s.b=mk_bench(seed,n);
+			const int loops=(n<=384u)?2:1;
+			const std::uint64_t loop_n=static_cast<std::uint64_t>(loops);
+			s.mul_base_ns=(bench_mul(s.a,s.b,loops,false)+loop_n/2u)/loop_n;
+			s.sqr_base_ns=(bench_sqr_mul(s.a,loops,false)+loop_n/2u)/loop_n;
+			for(std::size_t bi=0;bi<kBitsCand.size();++bi){
+				at_state().ntt_bits=kBitsCand[bi];
+				s.mul_ntt_ns[bi]=
+					(bench_mul(s.a,s.b,loops,true)+loop_n/2u)/loop_n;
+				s.sqr_ntt_ns[bi]=
+					(bench_sqr_mul(s.a,loops,true)+loop_n/2u)/loop_n;
 			}
-			prev_win=win;
-			prev_n=n;
+			samples.push_back(std::move(s));
 		}
-		at_state().ntt_th=tuned.ntt_th;
-		if(tuned.ntt_th!=kNttOff){
-			constexpr std::array<std::size_t,3> kNttImbCand={1u,2u,3u};
-			std::uint64_t seed2=0x2f2f2218beefcafeULL;
-			const BigInt a=mk_bench(seed2,tuned.ntt_th);
-			const BigInt b=mk_bench(seed2,tuned.ntt_th*2u);
-			const std::uint64_t t_kar=bench_mul(a,b,1,false);
-			const std::uint64_t t_ntt=bench_mul(a,b,1,true);
-			std::uint64_t best_cost=std::numeric_limits<std::uint64_t>::max();
-			std::size_t best_imb=tuned.ntt_imb;
-			for(std::size_t imb : kNttImbCand){
-				const std::uint64_t cost=(2u<=imb)?t_ntt:t_kar;
-				if(cost<best_cost){
-					best_cost=cost;
-					best_imb=imb;
+
+		std::uint64_t mul_off=0;
+		std::uint64_t sqr_off=0;
+		for(const auto&s : samples){
+			mul_off+=s.mul_base_ns;
+			sqr_off+=s.sqr_base_ns;
+		}
+		auto pick_nth=[&](std::size_t bi,bool square,
+						 std::uint64_t off_cost,
+						 std::uint64_t&best_cost)->std::size_t{
+			best_cost=off_cost;
+			std::size_t best_th=kNttOff;
+			for(std::size_t threshold : kNttCand){
+				bool used=false;
+				bool ok=true;
+				std::uint64_t cost=0;
+				for(const auto&s : samples){
+					const std::uint64_t base=
+						square?s.sqr_base_ns:s.mul_base_ns;
+					const std::uint64_t ntt=
+						square?s.sqr_ntt_ns[bi]:s.mul_ntt_ns[bi];
+					if(s.n>=threshold){
+						used=true;
+						if(ntt>base){
+							ok=false;
+							break;
+						}
+						cost+=ntt;
+					}else{
+						cost+=base;
+					}
 				}
+				if(ok&&used&&cost*std::uint64_t(100)<
+				   best_cost*std::uint64_t(99)){
+					best_cost=cost;
+					best_th=threshold;
+				}
+			}
+			return best_th;
+		};
+
+		std::uint64_t best_direct=std::numeric_limits<std::uint64_t>::max();
+		std::size_t best_direct_bits=tuned.ntt_bits;
+		for(std::size_t bi=0;bi<kBitsCand.size();++bi){
+			std::uint64_t cost=0;
+			for(const auto&s : samples){
+				cost+=s.mul_ntt_ns[bi];
+				cost+=s.sqr_ntt_ns[bi];
+			}
+			if(cost<best_direct){
+				best_direct=cost;
+				best_direct_bits=kBitsCand[bi];
+			}
+		}
+
+		std::uint64_t best_all=mul_off+sqr_off;
+		std::size_t best_bits=best_direct_bits;
+		std::size_t best_mul_th=tuned.ntt_th;
+		std::size_t best_sqr_th=tuned.ntt_sq_th;
+		for(std::size_t bi=0;bi<kBitsCand.size();++bi){
+			std::uint64_t mul_cost=0;
+			std::uint64_t sqr_cost=0;
+			const std::size_t mul_th=pick_nth(bi,false,mul_off,mul_cost);
+			const std::size_t sqr_th=pick_nth(bi,true,sqr_off,sqr_cost);
+			const std::uint64_t total=mul_cost+sqr_cost;
+			if(total<best_all){
+				best_all=total;
+				best_bits=kBitsCand[bi];
+				best_mul_th=mul_th;
+				best_sqr_th=sqr_th;
+			}
+		}
+		tuned.ntt_bits=best_bits;
+		tuned.ntt_th=best_mul_th;
+		tuned.ntt_sq_th=best_sqr_th;
+		at_state().ntt_bits=tuned.ntt_bits;
+		at_state().ntt_th=tuned.ntt_th;
+		at_state().ntt_sq_th=tuned.ntt_sq_th;
+		if(tuned.ntt_th!=kNttOff){
+			std::uint64_t seed2=0x2f2f2218beefcafeULL;
+			std::size_t best_imb=1u;
+			for(std::size_t ratio : {2u,3u}){
+				const BigInt a=mk_bench(seed2,tuned.ntt_th);
+				const BigInt b=mk_bench(seed2,tuned.ntt_th*ratio);
+				const std::uint64_t t_kar=bench_mul(a,b,1,false);
+				const std::uint64_t t_ntt=bench_mul(a,b,1,true);
+				if(t_ntt<=t_kar)
+					best_imb=ratio;
+				else
+					break;
 			}
 			tuned.ntt_imb=best_imb;
 			at_state().ntt_imb=best_imb;
@@ -6324,6 +7253,101 @@ inline void at_impl(){
 		tuned.bz_chunk=best_chunk;
 		at_state().bz_min=best_min;
 		at_state().bz_chunk=best_chunk;
+	}
+
+	{
+		std::uint64_t seed=0x91e10da5d10c0de1ULL;
+		constexpr std::array<std::size_t,5> kD10Cand={
+			96u,128u,192u,256u,384u};
+		struct D10Smp{
+			limbs_t x;
+			std::string s;
+			std::size_t n=0;
+			std::uint64_t base_ns=0;
+			std::array<std::uint64_t,kD10Cand.size()> dc_ns{};
+			std::uint64_t prs_base_ns=0;
+			std::array<std::uint64_t,kD10Cand.size()> prs_dc_ns{};
+		};
+		constexpr std::array<std::size_t,4> kD10Sizes={
+			64u,128u,256u,512u};
+		std::vector<D10Smp> samples;
+		samples.reserve(kD10Sizes.size());
+		for(std::size_t n : kD10Sizes){
+			D10Smp s{};
+			s.n=n;
+			s.x=mk_limb_bench(seed,n);
+			const int loops=(n<=64u)?2:1;
+			const std::uint64_t loop_n=static_cast<std::uint64_t>(loops);
+			s.base_ns=(bench_fmt_d10(s.x,loops,kNttOff)+loop_n/2u)/loop_n;
+			const std::string ref=to_str_d10(s.x,1,kNttOff);
+			s.s=ref;
+			s.prs_base_ns=
+				(bench_prs_d10(s.s,loops,kNttOff)+loop_n/2u)/loop_n;
+			for(std::size_t i=0;i<kD10Cand.size();++i){
+				s.dc_ns[i]=
+					(bench_fmt_d10(s.x,loops,kD10Cand[i])+loop_n/2u)/loop_n;
+				const std::string chk=to_str_d10(s.x,1,kD10Cand[i]);
+				MINI_MP_ASSERT(ref==chk);
+				s.prs_dc_ns[i]=
+					(bench_prs_d10(s.s,loops,kD10Cand[i])+loop_n/2u)/loop_n;
+				limbs_t chk_x;
+				const bool ok=prs_d10(s.s,&chk_x,kD10Cand[i]);
+				MINI_MP_ASSERT(ok&&chk_x==s.x);
+			}
+			samples.push_back(std::move(s));
+		}
+
+		std::uint64_t off_cost=0;
+		for(const auto&s : samples)
+			off_cost+=s.base_ns;
+		std::uint64_t best_cost=off_cost;
+		std::size_t best_th=kNttOff;
+		for(std::size_t i=0;i<kD10Cand.size();++i){
+			const std::size_t th=kD10Cand[i];
+			bool used=false;
+			std::uint64_t cost=0;
+			for(const auto&s : samples){
+				if(s.n>=th){
+					used=true;
+					cost+=s.dc_ns[i];
+				}else{
+					cost+=s.base_ns;
+				}
+			}
+			if(used&&cost*std::uint64_t(100)<best_cost*std::uint64_t(99)){
+				best_cost=cost;
+				best_th=th;
+			}
+		}
+		tuned.d10_dc=best_th;
+		at_state().d10_dc=best_th;
+
+		off_cost=0;
+		for(const auto&s : samples)
+			off_cost+=s.prs_base_ns;
+		best_cost=off_cost;
+		best_th=kNttOff;
+		for(std::size_t i=0;i<kD10Cand.size();++i){
+			const std::size_t th=kD10Cand[i];
+			bool used=false;
+			std::uint64_t cost=0;
+			for(const auto&s : samples){
+				const std::size_t chunks=
+					(s.s.size()+kD10Len-1u)/kD10Len;
+				if(chunks>=th){
+					used=true;
+					cost+=s.prs_dc_ns[i];
+				}else{
+					cost+=s.prs_base_ns;
+				}
+			}
+			if(used&&cost*std::uint64_t(100)<best_cost*std::uint64_t(99)){
+				best_cost=cost;
+				best_th=th;
+			}
+		}
+		tuned.d10_prs=best_th;
+		at_state().d10_prs=best_th;
 	}
 
 	{
@@ -6456,6 +7480,14 @@ inline std::size_t tun_ntt() noexcept{
 	return at_state().ntt_th;
 }
 
+inline std::size_t tun_ntt_sq() noexcept{
+	return at_state().ntt_sq_th;
+}
+
+inline std::size_t tun_ntt_bits() noexcept{
+	return at_state().ntt_bits;
+}
+
 inline std::size_t tun_krec() noexcept{
 	return at_state().kar_rec;
 }
@@ -6514,6 +7546,18 @@ inline std::size_t tun_pow_w5() noexcept{
 
 inline std::size_t tun_pow_w6() noexcept{
 	return at_state().pow_w6;
+}
+
+inline std::size_t tun_d10_dc() noexcept{
+	return at_state().d10_dc;
+}
+
+inline std::size_t tun_d10_prs() noexcept{
+	return at_state().d10_prs;
+}
+
+inline std::size_t tun_t3() noexcept{
+	return at_state().t3_th;
 }
 
 } 
@@ -6721,7 +7765,9 @@ inline BigInt lcm(const BigInt&a,const BigInt&b){
 	if(a.is_zero()||b.is_zero())
 		return BigInt();
 	const BigInt g=gcd(a,b);
-	BigInt out=(a/g)*b;
+	BigInt out=(detail::cmp_abs(a.limbs_,b.limbs_)<=0)
+		?(divexact(a,g)*b)
+		:(divexact(b,g)*a);
 	return out.abs();
 }
 
@@ -7213,22 +8259,46 @@ inline BigInt divexact(const BigInt&a,const BigInt&b){
 	}
 	if(a.is_zero())
 		return BigInt();
+	if(detail::pow2_abs(b.limbs_)){
+		const std::size_t sh=detail::pow2_exp_abs(b.limbs_);
+		if(!detail::low_bits_abs(a.limbs_,sh).empty()){
+			detail::throw_dom(
+				"divexact: dividend not divisible by divisor");
+		}
+		detail::limbs_t q=detail::shr_bits(a.limbs_,sh);
+		const int sign=q.empty()?0:((a.sign_==b.sign_)?1:-1);
+		return BigInt::from_raw(sign,std::move(q));
+	}
 	if(b.limbs_.size()==1){
 		detail::limbs_t q=a.limbs_;
-		const std::uint64_t rem=detail::div_limb_ip(q,b.limbs_[0]);
-		if(rem!=0){
+		if(!detail::divex_lb(q,b.limbs_[0])){
 			detail::throw_dom(
 				"divexact: dividend not divisible by divisor");
 		}
 		const int sign=q.empty()?0:((a.sign_==b.sign_)?1:-1);
 		return BigInt::from_raw(sign,std::move(q));
 	}
-	auto qr=divmod(a,b);
-	if(!qr.second.is_zero()){
-		detail::throw_dom(
-			"divexact: dividend not divisible by divisor");
+	const std::size_t btz=detail::ctz(b.limbs_);
+	if(btz!=0){
+		if(detail::ctz(a.limbs_)<btz){
+			detail::throw_dom(
+				"divexact: dividend not divisible by divisor");
+		}
+		detail::limbs_t amag=detail::shr_bits(a.limbs_,btz);
+		detail::limbs_t bmag=detail::shr_bits(b.limbs_,btz);
+		BigInt aa=BigInt::from_raw(a.sign_,std::move(amag));
+		BigInt bb=BigInt::from_raw(b.sign_,std::move(bmag));
+		return divexact(aa,bb);
 	}
-	return qr.first;
+	{
+		detail::limbs_t q;
+		if(!detail::divex_odd(a.limbs_,b.limbs_,q)){
+			detail::throw_dom(
+				"divexact: dividend not divisible by divisor");
+		}
+		const int sign=q.empty()?0:((a.sign_==b.sign_)?1:-1);
+		return BigInt::from_raw(sign,std::move(q));
+	}
 }
 
 inline std::pair<BigInt,BigInt> sqrtrem(const BigInt&n){
@@ -7425,6 +8495,15 @@ inline bool is_ppow(const BigInt&n){
 inline bool is_square(const BigInt&n){
 	if(n.sign()<0)
 		return false;
+	const std::uint32_t r256=n.limbs_.empty()
+		?0u
+		:static_cast<std::uint32_t>(n.limbs_[0]&255u);
+	const std::uint32_t r4095=n.mod_u32(4095u);
+	if(!detail::sqr_res_ok<256u>(r256)||
+	   !detail::sqr_res_ok<63u>(r4095%63u)||
+	   !detail::sqr_res_ok<65u>(r4095%65u)){
+		return false;
+	}
 	return sqrtrem(n).second.is_zero();
 }
 
@@ -7436,15 +8515,32 @@ inline int pr_prime(const BigInt&n,int rounds){
 	if(n<BigInt(2)||n.is_even())
 		return 0;
 
-	static constexpr std::uint32_t kSmPrime[]={
-		3u, 5u, 7u, 11u,13u,17u,19u,23u,29u,31u,37u,41u,
-		43u,47u,53u,59u,61u,67u,71u,73u,79u,83u,89u,97u};
 	if(n.fits_u64()){
 		return detail::is_prp64(n.to_u64())?2:0;
 	}else{
-		for(const std::uint32_t p : kSmPrime){
-			if(n.mod_u32(p)==0u)
-				return 0;
+		auto hit_small=[&](std::uint32_t prod,
+						   const std::uint32_t*ps,
+						   std::size_t count)->bool{
+			const std::uint32_t r=n.mod_u32(prod);
+			for(std::size_t i=0;i<count;++i){
+				if((r%ps[i])==0u)
+					return true;
+			}
+			return false;
+		};
+		static constexpr std::uint32_t kG0[]={
+			3u,5u,7u,11u,13u,17u,19u,23u,29u};
+		static constexpr std::uint32_t kG1[]={
+			31u,37u,41u,43u,47u};
+		static constexpr std::uint32_t kG2[]={
+			53u,59u,61u,67u,71u};
+		static constexpr std::uint32_t kG3[]={
+			73u,79u,83u,89u,97u};
+		if(hit_small(3234846615u,kG0,sizeof(kG0)/sizeof(kG0[0]))||
+		   hit_small(95041567u,kG1,sizeof(kG1)/sizeof(kG1[0]))||
+		   hit_small(907383479u,kG2,sizeof(kG2)/sizeof(kG2[0]))||
+		   hit_small(4132280413u,kG3,sizeof(kG3)/sizeof(kG3[0]))){
+			return 0;
 		}
 	}
 
@@ -7859,6 +8955,17 @@ int main(){
 	}else{
 		std::cout<<tun_nth<<"\n";
 	}
+#if MINI_MP_ENABLE_NTT
+	const std::size_t tun_nsth=mini_mp::detail::tun_ntt_sq();
+	std::cout<<"autotune.ntt_sq_th=";
+	if(tun_nsth==mini_mp::detail::kNttOff){
+		std::cout<<"disabled\n";
+	}else{
+		std::cout<<tun_nsth<<"\n";
+	}
+	std::cout<<"autotune.ntt_bits="
+			 <<mini_mp::detail::tun_ntt_bits()<<"\n";
+#endif
 	std::cout<<"autotune.kar_th="
 			 <<mini_mp::detail::tun_kar()<<"\n";
 	std::cout<<"autotune.kar_rec="
@@ -7891,10 +8998,31 @@ int main(){
 			 <<mini_mp::detail::tun_pow_w5()<<"\n";
 	std::cout<<"autotune.pow_w6="
 			 <<mini_mp::detail::tun_pow_w6()<<"\n";
+	std::cout<<"autotune.d10_dc=";
+	const std::size_t tun_d10=mini_mp::detail::tun_d10_dc();
+	if(tun_d10==mini_mp::detail::kNttOff){
+		std::cout<<"disabled\n";
+	}else{
+		std::cout<<tun_d10<<"\n";
+	}
+	std::cout<<"autotune.d10_prs=";
+	const std::size_t tun_d10_prs=mini_mp::detail::tun_d10_prs();
+	if(tun_d10_prs==mini_mp::detail::kNttOff){
+		std::cout<<"disabled\n";
+	}else{
+		std::cout<<tun_d10_prs<<"\n";
+	}
+	std::cout<<"autotune.t3_th=";
+	const std::size_t tun_t3=mini_mp::detail::tun_t3();
+	if(tun_t3==mini_mp::detail::kNttOff){
+		std::cout<<"disabled\n";
+	}else{
+		std::cout<<tun_t3<<"\n";
+	}
 
 	std::cout<<"\n[mul backend ns/op]\n";
 	std::cout<<std::left<<std::setw(10)<<"limbs"<<std::setw(14)<<"schoolbook"
-			 <<std::setw(14)<<"karatsuba";
+			 <<std::setw(14)<<"karatsuba"<<std::setw(14)<<"toom3";
 #if MINI_MP_ENABLE_NTT
 	std::cout<<std::setw(14)<<"ntt";
 #endif
@@ -7911,6 +9039,8 @@ int main(){
 		const std::uint64_t t_school=bench_sch(a,b,loops);
 		const std::uint64_t t_kar=
 			mini_mp::detail::bench_mul(a,b,loops,false);
+		const std::uint64_t t_t3=
+			mini_mp::detail::bench_t3(a,b,loops);
 #if MINI_MP_ENABLE_NTT
 		const std::uint64_t t_ntt=
 			mini_mp::detail::bench_mul(a,b,loops,true);
@@ -7918,7 +9048,8 @@ int main(){
 
 		std::cout<<std::left<<std::setw(10)<<limbs<<std::setw(14)
 				 <<(t_school/static_cast<std::uint64_t>(loops))<<std::setw(14)
-				 <<(t_kar/static_cast<std::uint64_t>(loops));
+				 <<(t_kar/static_cast<std::uint64_t>(loops))<<std::setw(14)
+				 <<(t_t3/static_cast<std::uint64_t>(loops));
 #if MINI_MP_ENABLE_NTT
 		std::cout<<std::setw(14)<<(t_ntt/static_cast<std::uint64_t>(loops));
 #endif
