@@ -3856,10 +3856,60 @@ inline std::size_t sqrsbk_to(std::uint64_t*out,lbv_t x){
 	x=lbv_trim(x);
 	if(x.empty())
 		return 0;
-	const limbs_t tmp=sqrsbk_v(x);
-	if(!tmp.empty())
-		std::memcpy(out,tmp.data(),tmp.size()*sizeof(limb_t));
-	return tmp.size();
+	if(x.n<=kCbaMax){
+		const limbs_t tmp=mulcba_v(x,x);
+		if(!tmp.empty())
+			std::memcpy(out,tmp.data(),tmp.size()*sizeof(limb_t));
+		return tmp.size();
+	}
+
+	const std::size_t n=x.n;
+	const std::size_t out_n=2u*n;
+	std::memset(out,0,out_n*sizeof(limb_t));
+	for(std::size_t i=0;i+1u<n;++i){
+		const std::size_t len=n-i-1u;
+		const std::uint64_t cy=am_1n(
+			out+static_cast<std::ptrdiff_t>(2u*i+1u),
+			x.p+static_cast<std::ptrdiff_t>(i+1u),len,x[i]);
+		std::size_t pos=n+i;
+		std::uint64_t carry=cy;
+		while(carry!=0){
+			MINI_MP_ASSERT(pos<out_n);
+			std::uint64_t sum=0;
+			carry=addc_u64(0,out[pos],carry,&sum);
+			out[pos]=sum;
+			++pos;
+		}
+	}
+
+	std::uint64_t carry=0;
+	for(std::size_t i=0;i<out_n;++i){
+		const std::uint64_t next=out[i]>>63u;
+		out[i]=(out[i]<<1u)|carry;
+		carry=next;
+	}
+	MINI_MP_ASSERT(carry==0);
+
+	for(std::size_t i=0;i<n;++i){
+		const u128 p=mul_u64(x[i],x[i]);
+		const std::size_t pos=2u*i;
+		std::uint64_t s0=0;
+		std::uint64_t cy=addc_u64(0,out[pos],p.lo,&s0);
+		out[pos]=s0;
+		std::uint64_t s1=0;
+		const std::uint64_t cy2=addc_u64(cy,out[pos+1u],p.hi,&s1);
+		out[pos+1u]=s1;
+		std::size_t j=pos+2u;
+		std::uint64_t extra=cy2;
+		while(extra!=0){
+			MINI_MP_ASSERT(j<out_n);
+			std::uint64_t sum=0;
+			extra=addc_u64(0,out[j],extra,&sum);
+			out[j]=sum;
+			++j;
+		}
+	}
+	return lb_nz(out,out_n);
 }
 
 inline limbs_t slc_limb(const limbs_t&x,std::size_t begin,std::size_t end){
@@ -3918,6 +3968,7 @@ inline constexpr std::size_t kKarRecB=24;
 inline constexpr std::size_t kKarDifMin=96;
 
 inline std::size_t tun_krec() noexcept;
+inline std::size_t tun_srec() noexcept;
 inline std::size_t tun_kar() noexcept;
 inline std::size_t tun_kar_imb() noexcept;
 inline std::size_t tun_kdif() noexcept;
@@ -4235,7 +4286,7 @@ inline limbs_t sqrkar_v(lbv_t x,std::size_t rec_b){
 inline limbs_t sqrkar_ab(const limbs_t&x){
 	if(x.empty())
 		return {};
-	return sqrkar_o(lbv_all(x),tun_krec());
+	return sqrkar_o(lbv_all(x),tun_srec());
 }
 
 inline bool mulbig_ok(std::size_t an,std::size_t bn) noexcept{
@@ -5202,6 +5253,7 @@ inline std::size_t tun_ntt() noexcept;
 inline std::size_t tun_ntt_sq() noexcept;
 inline std::size_t tun_ntt_bits() noexcept;
 inline std::size_t tun_krec() noexcept;
+inline std::size_t tun_srec() noexcept;
 inline std::size_t tun_kar() noexcept;
 inline std::size_t tun_kar_imb() noexcept;
 inline std::size_t tun_ntt_imb() noexcept;
@@ -7248,6 +7300,7 @@ struct ATState{
 	std::size_t ntt_sq_th=kNttDef;
 	std::size_t ntt_bits=kNttBitsDef;
 	std::size_t kar_rec=kKarRecB;
+	std::size_t sqr_rec=kKarRecB;
 	std::size_t kar_th=kKarTh;
 	std::size_t kar_imb=kKarImb;
 	std::size_t kar_dif=kKarDifMin;
@@ -7273,12 +7326,12 @@ inline ATState&at_state() noexcept{
 	return state;
 }
 
-inline std::atomic<bool>&at_done() noexcept{
-	static std::atomic<bool> done{
+inline std::atomic<unsigned>&at_done() noexcept{
+	static std::atomic<unsigned> done{
 #if MINI_MP_ENABLE_AUTOTUNE
-		false
+		0u
 #else
-		true
+		2u
 #endif
 	};
 	return done;
@@ -7287,6 +7340,64 @@ inline std::atomic<bool>&at_done() noexcept{
 inline bool&at_busy() noexcept{
 	static thread_local bool busy=false;
 	return busy;
+}
+
+inline ATState at_base(){
+	ATState tuned{};
+	tuned.ntt_th=kNttOff;
+	tuned.ntt_sq_th=kNttOff;
+	tuned.ntt_bits=kNttBitsDef;
+	tuned.kar_rec=kKarRecB;
+	tuned.sqr_rec=kKarRecB;
+	tuned.kar_th=kKarTh;
+	tuned.kar_imb=kKarImb;
+	tuned.kar_dif=kKarDifMin;
+	tuned.ntt_imb=kNttImb;
+	tuned.hl_min=kHlmDef;
+	tuned.hl_rnd=kHlrDef;
+	tuned.gcd_sm=kGcdSmMxDef;
+	tuned.gcd_lg=kGcdLgMxDef;
+	tuned.bz_min=kBzDivMnDef;
+	tuned.bz_chunk=kBzChunkDef;
+	tuned.prod_leaf=kProdLeafDef;
+	tuned.fac_tree=kFacTreeDef;
+	tuned.binom_tree=kBinomTreeDef;
+	tuned.pow_w5=kPowW5Def;
+	tuned.pow_w6=kPowW6Def;
+	tuned.d10_dc=kD10DcDef;
+	tuned.d10_prs=kD10PrsDef;
+	tuned.t3_th=kT3Def;
+	return tuned;
+}
+
+inline char at_lc(char c) noexcept{
+	return (c>='A'&&c<='Z')?static_cast<char>(c-'A'+'a'):c;
+}
+
+inline bool at_eq(const char*s,const char*lit) noexcept{
+	while(*s!=0&&*lit!=0){
+		if(at_lc(*s)!=*lit)
+			return false;
+		++s;
+		++lit;
+	}
+	return *s==0&&*lit==0;
+}
+
+inline unsigned at_env_level() noexcept{
+	const char*const v=std::getenv("MINI_MP_AUTOTUNE");
+	if(v==nullptr||*v==0)
+		return 1u;
+	if(at_eq(v,"0")||at_eq(v,"off")||at_eq(v,"none"))
+		return 0u;
+	if(at_eq(v,"2")||at_eq(v,"full")||at_eq(v,"all"))
+		return 2u;
+	return 1u;
+}
+
+inline unsigned at_default_level() noexcept{
+	static const unsigned level=at_env_level();
+	return level;
 }
 
 inline std::uint64_t at_rng(std::uint64_t&s) noexcept{
@@ -7556,47 +7667,274 @@ inline std::uint64_t bench_binom(std::uint64_t n,std::uint64_t k,int loops,
 		std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count());
 }
 
-inline void at_impl(){
-	ATState tuned{};
-	tuned.ntt_th=kNttOff;
-	tuned.ntt_sq_th=kNttOff;
-	tuned.ntt_bits=kNttBitsDef;
-	tuned.kar_rec=kKarRecB;
-	tuned.kar_th=kKarTh;
-	tuned.kar_imb=kKarImb;
-	tuned.kar_dif=kKarDifMin;
-	tuned.ntt_imb=kNttImb;
-	tuned.hl_min=kHlmDef;
-	tuned.hl_rnd=kHlrDef;
-	tuned.gcd_sm=kGcdSmMxDef;
-	tuned.gcd_lg=kGcdLgMxDef;
-	tuned.bz_min=kBzDivMnDef;
-	tuned.bz_chunk=kBzChunkDef;
-	tuned.prod_leaf=kProdLeafDef;
-	tuned.fac_tree=kFacTreeDef;
-	tuned.binom_tree=kBinomTreeDef;
-	tuned.pow_w5=kPowW5Def;
-	tuned.pow_w6=kPowW6Def;
-	tuned.d10_dc=kD10DcDef;
-	tuned.d10_prs=kD10PrsDef;
-	tuned.t3_th=kT3Def;
+inline void at_impl_fast(){
+	ATState tuned=at_base();
+	tuned.kar_th=48u;
+	tuned.kar_rec=48u;
+	tuned.sqr_rec=64u;
+	tuned.kar_dif=96u;
+	tuned.hl_min=8u;
+	tuned.hl_rnd=0u;
+	tuned.gcd_sm=128u;
+	tuned.gcd_lg=128u;
+	tuned.d10_dc=256u;
+	tuned.d10_prs=256u;
 	at_state()=tuned;
+	auto per_op=[](std::uint64_t ns,std::uint64_t ops)->std::uint64_t{
+		return (ns+ops/2u)/ops;
+	};
+
+	{
+		std::uint64_t seed=0x4f1bbcdc8a5a3f21ULL;
+		constexpr std::array<std::size_t,2> kRecCand={40u,48u};
+		constexpr std::array<std::size_t,2> kDifCand={64u,96u};
+		struct Smp{
+			std::size_t n;
+			int loops;
+			std::uint64_t weight;
+		};
+		constexpr std::array<Smp,3> kSmp={{
+			{64u,4,1u},{128u,2,2u},{256u,1,3u}}};
+		auto cost_of=[&](std::size_t rec,std::size_t dif)->std::uint64_t{
+			at_state().kar_rec=rec;
+			at_state().kar_dif=dif;
+			std::uint64_t cost=0;
+			std::uint64_t s=seed;
+			for(const auto&sm : kSmp){
+				const BigInt a=mk_bench(s,sm.n);
+				const BigInt b=mk_bench(s,sm.n);
+				cost+=per_op(bench_mul(a,b,sm.loops,false),
+							 static_cast<std::uint64_t>(sm.loops))*sm.weight;
+			}
+			return cost;
+		};
+		std::size_t best_rec=tuned.kar_rec;
+		std::size_t best_dif=tuned.kar_dif;
+		std::uint64_t best=cost_of(best_rec,best_dif);
+		for(std::size_t rec : kRecCand){
+			for(std::size_t dif : kDifCand){
+				const std::uint64_t cost=cost_of(rec,dif);
+				if(cost*std::uint64_t(100)<best*std::uint64_t(90)){
+					best=cost;
+					best_rec=rec;
+					best_dif=dif;
+				}
+			}
+		}
+		tuned.kar_rec=best_rec;
+		tuned.kar_dif=best_dif;
+		at_state().kar_rec=best_rec;
+		at_state().kar_dif=best_dif;
+	}
+
+	{
+		std::uint64_t seed=0x736f6d6570736575ULL;
+		constexpr std::array<std::size_t,3> kThCand={40u,48u,64u};
+		std::array<std::uint64_t,kThCand.size()> school_ns{};
+		std::array<std::uint64_t,kThCand.size()> kar_ns{};
+		for(std::size_t i=0;i<kThCand.size();++i){
+			const std::size_t n=kThCand[i];
+			const int loops=(n<=64u)?4:(n<=128u)?2:1;
+			const BigInt a=mk_bench(seed,n);
+			const BigInt b=mk_bench(seed,n);
+			school_ns[i]=per_op(bench_sbk(a,b,loops),
+								static_cast<std::uint64_t>(loops));
+			kar_ns[i]=per_op(bench_mul(a,b,loops,false),
+							  static_cast<std::uint64_t>(loops));
+		}
+		auto th_cost=[&](std::size_t th)->std::uint64_t{
+			std::uint64_t cost=0;
+			for(std::size_t i=0;i<kThCand.size();++i){
+				const std::uint64_t w=(kThCand[i]>=128u)?3u:2u;
+				const std::uint64_t ns=
+					(kThCand[i]>=th)?kar_ns[i]:school_ns[i];
+				cost+=ns*w;
+			}
+			return cost;
+		};
+		std::size_t best_th=tuned.kar_th;
+		std::uint64_t best=th_cost(best_th);
+		for(std::size_t th : kThCand){
+			const std::uint64_t cost=th_cost(th);
+			if(cost*std::uint64_t(100)<best*std::uint64_t(95)){
+				best=cost;
+				best_th=th;
+			}
+		}
+		tuned.kar_th=best_th;
+		at_state().kar_th=best_th;
+	}
+
+	{
+		std::uint64_t seed=0xe7037ed1a0b428dbULL;
+		constexpr std::array<std::size_t,3> kRecCand={56u,64u,80u};
+		struct Smp{
+			std::size_t n;
+			int loops;
+			std::uint64_t weight;
+		};
+		constexpr std::array<Smp,3> kSmp={{
+			{64u,4,1u},{128u,2,2u},{256u,1,3u}}};
+		auto cost_of=[&](std::size_t rec)->std::uint64_t{
+			at_state().sqr_rec=rec;
+			std::uint64_t cost=0;
+			std::uint64_t s=seed;
+			for(const auto&sm : kSmp){
+				const BigInt a=mk_bench(s,sm.n);
+				cost+=per_op(bench_sqr_mul(a,sm.loops,false),
+							 static_cast<std::uint64_t>(sm.loops))*sm.weight;
+			}
+			return cost;
+		};
+		std::size_t best_rec=tuned.sqr_rec;
+		std::uint64_t best=cost_of(best_rec);
+		for(std::size_t rec : kRecCand){
+			const std::uint64_t cost=cost_of(rec);
+			if(cost*std::uint64_t(100)<best*std::uint64_t(98)){
+				best=cost;
+				best_rec=rec;
+			}
+		}
+		tuned.sqr_rec=best_rec;
+		at_state().sqr_rec=best_rec;
+	}
+
+	{
+		std::uint64_t seed=0xc6bc279692b5cc83ULL;
+		std::vector<std::pair<BigInt,BigInt>> samples;
+		for(std::size_t n : {96u,256u}){
+			BigInt a=mk_bench(seed,n);
+			BigInt b=mk_bench(seed,n);
+			if(a<b)
+				std::swap(a,b);
+			samples.emplace_back(std::move(a),std::move(b));
+		}
+		constexpr std::array<std::size_t,2> kMinCand={4u,8u};
+		constexpr std::array<std::size_t,3> kSmCand={64u,128u,256u};
+		constexpr std::array<std::size_t,4> kLgCand={32u,96u,128u,192u};
+		std::uint64_t best=std::numeric_limits<std::uint64_t>::max();
+		std::size_t best_min=tuned.hl_min;
+		std::size_t best_sm=tuned.gcd_sm;
+		std::size_t best_lg=tuned.gcd_lg;
+		for(std::size_t mn : kMinCand){
+			for(std::size_t sm : kSmCand){
+				for(std::size_t lg : kLgCand){
+					at_state().gcd_sm=sm;
+					at_state().gcd_lg=lg;
+					const std::uint64_t cost=bench_gcd(samples,mn,0u);
+					if(cost<best){
+						best=cost;
+						best_min=mn;
+						best_sm=sm;
+						best_lg=lg;
+					}
+				}
+			}
+		}
+		tuned.hl_min=best_min;
+		tuned.hl_rnd=0u;
+		tuned.gcd_sm=best_sm;
+		tuned.gcd_lg=best_lg;
+		at_state().hl_min=best_min;
+		at_state().hl_rnd=0u;
+		at_state().gcd_sm=best_sm;
+		at_state().gcd_lg=best_lg;
+	}
+
+	{
+		std::uint64_t seed=0x9fb21c651e98df25ULL;
+		constexpr std::array<std::size_t,3> kCand={192u,256u,384u};
+		struct Smp{
+			limbs_t x;
+			std::string s;
+			std::size_t n=0;
+			std::uint64_t base_ns=0;
+			std::array<std::uint64_t,kCand.size()> fmt_ns{};
+			std::uint64_t prs_base_ns=0;
+			std::array<std::uint64_t,kCand.size()> prs_ns{};
+		};
+		std::vector<Smp> samples;
+		for(std::size_t n : {256u,512u}){
+			Smp sm{};
+			sm.n=n;
+			sm.x=mk_limb_bench(seed,n);
+			sm.base_ns=bench_fmt_d10(sm.x,1,kNttOff);
+			sm.s=to_str_d10(sm.x,1,kNttOff);
+			sm.prs_base_ns=bench_prs_d10(sm.s,1,kNttOff);
+			for(std::size_t i=0;i<kCand.size();++i){
+				sm.fmt_ns[i]=bench_fmt_d10(sm.x,1,kCand[i]);
+				const std::string chk=to_str_d10(sm.x,1,kCand[i]);
+				MINI_MP_ASSERT(chk==sm.s);
+				sm.prs_ns[i]=bench_prs_d10(sm.s,1,kCand[i]);
+				limbs_t v;
+				const bool ok=prs_d10(sm.s,&v,kCand[i]);
+				MINI_MP_ASSERT(ok&&v==sm.x);
+			}
+			samples.push_back(std::move(sm));
+		}
+		auto pick=[&](bool parse)->std::size_t{
+			std::uint64_t best=0;
+			for(const auto&sm : samples)
+				best+=parse?sm.prs_base_ns:sm.base_ns;
+			std::size_t best_th=kNttOff;
+			for(std::size_t i=0;i<kCand.size();++i){
+				std::uint64_t cost=0;
+				bool used=false;
+				for(const auto&sm : samples){
+					const std::size_t k=parse?
+						((sm.s.size()+kD10Len-1u)/kD10Len):sm.n;
+					if(k>=kCand[i]){
+						used=true;
+						cost+=parse?sm.prs_ns[i]:sm.fmt_ns[i];
+					}else{
+						cost+=parse?sm.prs_base_ns:sm.base_ns;
+					}
+				}
+				if(used&&cost*std::uint64_t(100)<best*std::uint64_t(99)){
+					best=cost;
+					best_th=kCand[i];
+				}
+			}
+			return best_th;
+		};
+		tuned.d10_dc=pick(false);
+		tuned.d10_prs=pick(true);
+		at_state().d10_dc=tuned.d10_dc;
+		at_state().d10_prs=tuned.d10_prs;
+	}
+
+	at_state()=tuned;
+}
+
+inline void at_impl_full(){
+	ATState tuned=at_base();
+	at_state()=tuned;
+	auto per_op=[](std::uint64_t ns,std::uint64_t ops)->std::uint64_t{
+		return (ns+ops/2u)/ops;
+	};
 
 	{
 		std::uint64_t seed=0x27bb2ee687b0b0fdULL;
 		constexpr std::array<std::size_t,5> kRecCand={
-			16u,24u,32u,40u,48u};
+			32u,40u,48u,56u,64u};
+		struct RecSmp{
+			std::size_t n;
+			int loops;
+			std::uint64_t weight;
+		};
+		constexpr std::array<RecSmp,4> kRecSmp={{
+			{64u,6,2u},{128u,4,2u},{256u,2,3u},{512u,1,4u}}};
 		std::uint64_t best_cost=std::numeric_limits<std::uint64_t>::max();
 		std::size_t best_rec=tuned.kar_rec;
 		for(std::size_t rec : kRecCand){
 			at_state().kar_rec=rec;
 			std::uint64_t cost=0;
 			std::uint64_t s=seed;
-			for(std::size_t n : {64u,128u,256u}){
-				const BigInt a=mk_bench(s,n);
-				const BigInt b=mk_bench(s,n);
-				const int loops=(n<=64u)?5:(n<=128u)?3:1;
-				cost+=bench_mul(a,b,loops,false);
+			for(const auto&sm : kRecSmp){
+				const BigInt a=mk_bench(s,sm.n);
+				const BigInt b=mk_bench(s,sm.n);
+				cost+=per_op(bench_mul(a,b,sm.loops,false),
+							 static_cast<std::uint64_t>(sm.loops))*sm.weight;
 			}
 			if(cost<best_cost){
 				best_cost=cost;
@@ -7609,14 +7947,16 @@ inline void at_impl(){
 
 	{
 		std::uint64_t seed=0xa24baed4963ee407ULL;
-		constexpr std::array<std::size_t,11> kKarCand={
-			64u,96u,128u,160u,192u,224u,256u,320u,384u,512u,640u};
+		constexpr std::array<std::size_t,15> kKarCand={
+			40u,48u,56u,64u,80u,96u,128u,160u,192u,
+			224u,256u,320u,384u,512u,640u};
 		std::array<std::uint64_t,kKarCand.size()> school_ns{};
 		std::array<std::uint64_t,kKarCand.size()> kar_ns{};
 
 		for(std::size_t idx=0;idx<kKarCand.size();++idx){
 			const std::size_t n=kKarCand[idx];
-			const int loops=(n<=96u)?6:(n<=192u)?4:(n<=320u)?3:(n<=512u)?2:1;
+			const int loops=
+				(n<=64u)?8:(n<=128u)?5:(n<=256u)?3:(n<=512u)?2:1;
 			std::uint64_t t_schsum=0;
 			std::uint64_t t_kar_sum=0;
 			for(int sample=0;sample<2;++sample){
@@ -7627,16 +7967,21 @@ inline void at_impl(){
 			}
 			const std::uint64_t ops=
 				static_cast<std::uint64_t>(loops)*std::uint64_t(2);
-			school_ns[idx]=(t_schsum+ops/2u)/ops;
-			kar_ns[idx]=(t_kar_sum+ops/2u)/ops;
+			school_ns[idx]=per_op(t_schsum,ops);
+			kar_ns[idx]=per_op(t_kar_sum,ops);
 		}
 
+		auto kar_weight=[](std::size_t n)->std::uint64_t{
+			return (n>=512u)?4u:(n>=224u)?3u:2u;
+		};
 		std::uint64_t best_cost=std::numeric_limits<std::uint64_t>::max();
 		std::size_t best_th=tuned.kar_th;
 		for(std::size_t threshold : kKarCand){
 			std::uint64_t cost=0;
 			for(std::size_t i=0;i<kKarCand.size();++i){
-				cost+=(kKarCand[i]>=threshold)?kar_ns[i]:school_ns[i];
+				const std::uint64_t ns=
+					(kKarCand[i]>=threshold)?kar_ns[i]:school_ns[i];
+				cost+=ns*kar_weight(kKarCand[i]);
 			}
 			if(cost<best_cost){
 				best_cost=cost;
@@ -7693,17 +8038,24 @@ inline void at_impl(){
 		std::uint64_t seed=0x7d2b4f8a93c1e51dULL;
 		constexpr std::array<std::size_t,5> kDifCand={
 			64u,96u,128u,192u,kNttOff};
+		struct DifSmp{
+			std::size_t n;
+			int loops;
+			std::uint64_t weight;
+		};
+		constexpr std::array<DifSmp,4> kDifSmp={{
+			{64u,6,2u},{128u,4,2u},{256u,2,3u},{512u,1,4u}}};
 		std::uint64_t best_cost=std::numeric_limits<std::uint64_t>::max();
 		std::size_t best_dif=tuned.kar_dif;
 		for(std::size_t dif : kDifCand){
 			at_state().kar_dif=dif;
 			std::uint64_t cost=0;
 			std::uint64_t s=seed;
-			for(std::size_t n : {64u,128u,256u}){
-				const BigInt a=mk_bench(s,n);
-				const BigInt b=mk_bench(s,n);
-				const int loops=(n<=64u)?5:(n<=128u)?3:1;
-				cost+=bench_mul(a,b,loops,false);
+			for(const auto&sm : kDifSmp){
+				const BigInt a=mk_bench(s,sm.n);
+				const BigInt b=mk_bench(s,sm.n);
+				cost+=per_op(bench_mul(a,b,sm.loops,false),
+							 static_cast<std::uint64_t>(sm.loops))*sm.weight;
 			}
 			if(cost<best_cost){
 				best_cost=cost;
@@ -7712,6 +8064,138 @@ inline void at_impl(){
 		}
 		tuned.kar_dif=best_dif;
 		at_state().kar_dif=best_dif;
+	}
+
+	{
+		std::uint64_t seed=0x92d4c37a56a5f39bULL;
+		constexpr std::array<std::size_t,5> kRecCand={
+			32u,40u,48u,56u,64u};
+		constexpr std::array<std::size_t,5> kDifCand={
+			64u,96u,128u,192u,kNttOff};
+		struct PairSmp{
+			std::size_t n;
+			int loops;
+			std::uint64_t weight;
+		};
+		constexpr std::array<PairSmp,5> kPairSmp={{
+			{64u,8,1u},{128u,5,2u},{256u,3,3u},
+			{512u,1,4u},{1024u,1,4u}}};
+		auto pair_cost=[&](std::size_t rec,std::size_t dif)->std::uint64_t{
+			at_state().kar_rec=rec;
+			at_state().kar_dif=dif;
+			std::uint64_t cost=0;
+			for(int pass=0;pass<2;++pass){
+				std::uint64_t s=seed+std::uint64_t(pass)*0x9e3779b97f4a7c15ULL;
+				for(const auto&sm : kPairSmp){
+					const BigInt a=mk_bench(s,sm.n);
+					const BigInt b=mk_bench(s,sm.n);
+					const std::uint64_t ops=static_cast<std::uint64_t>(sm.loops);
+					cost+=per_op(bench_mul(a,b,sm.loops,false),ops)*sm.weight;
+				}
+			}
+			return cost;
+		};
+		std::size_t best_rec=tuned.kar_rec;
+		std::size_t best_dif=tuned.kar_dif;
+		std::uint64_t best_cost=std::numeric_limits<std::uint64_t>::max();
+		for(std::size_t rec : kRecCand){
+			for(std::size_t dif : kDifCand){
+				const std::uint64_t cost=pair_cost(rec,dif);
+				if(cost<best_cost){
+					best_cost=cost;
+					best_rec=rec;
+					best_dif=dif;
+				}
+			}
+		}
+		tuned.kar_rec=best_rec;
+		tuned.kar_dif=best_dif;
+		at_state().kar_rec=best_rec;
+		at_state().kar_dif=best_dif;
+	}
+
+	{
+		std::uint64_t seed=0x8c03fef146b1d2a3ULL;
+		constexpr std::array<std::size_t,6> kSqrRecCand={
+			40u,48u,56u,64u,80u,96u};
+		struct SqrSmp{
+			std::size_t n;
+			int loops;
+			std::uint64_t weight;
+		};
+		constexpr std::array<SqrSmp,4> kSqrSmp={{
+			{64u,8,1u},{128u,5,2u},{256u,3,3u},{512u,1,4u}}};
+		auto sqr_cost=[&](std::size_t rec)->std::uint64_t{
+			at_state().sqr_rec=rec;
+			std::uint64_t cost=0;
+			std::uint64_t s=seed;
+			for(const auto&sm : kSqrSmp){
+				const BigInt a=mk_bench(s,sm.n);
+				const std::uint64_t ops=static_cast<std::uint64_t>(sm.loops);
+				cost+=per_op(bench_sqr_mul(a,sm.loops,false),ops)*sm.weight;
+			}
+			return cost;
+		};
+		std::size_t best_rec=tuned.sqr_rec;
+		std::uint64_t best_cost=std::numeric_limits<std::uint64_t>::max();
+		for(std::size_t rec : kSqrRecCand){
+			const std::uint64_t cost=sqr_cost(rec);
+			if(cost<best_cost){
+				best_cost=cost;
+				best_rec=rec;
+			}
+		}
+		tuned.sqr_rec=best_rec;
+		at_state().sqr_rec=best_rec;
+	}
+
+	{
+		std::uint64_t seed=0x3bd39e10cb0ef593ULL;
+		constexpr std::array<std::size_t,15> kKarCand={
+			40u,48u,56u,64u,80u,96u,128u,160u,192u,
+			224u,256u,320u,384u,512u,640u};
+		std::array<std::uint64_t,kKarCand.size()> school_ns{};
+		std::array<std::uint64_t,kKarCand.size()> kar_ns{};
+		for(std::size_t idx=0;idx<kKarCand.size();++idx){
+			const std::size_t n=kKarCand[idx];
+			const int loops=
+				(n<=64u)?8:(n<=128u)?5:(n<=256u)?3:(n<=512u)?2:1;
+			std::uint64_t t_sch=0;
+			std::uint64_t t_kar=0;
+			for(int sample=0;sample<2;++sample){
+				const BigInt a=mk_bench(seed,n);
+				const BigInt b=mk_bench(seed,n);
+				t_sch+=bench_sbk(a,b,loops);
+				t_kar+=bench_mul(a,b,loops,false);
+			}
+			const std::uint64_t ops=
+				static_cast<std::uint64_t>(loops)*std::uint64_t(2);
+			school_ns[idx]=per_op(t_sch,ops);
+			kar_ns[idx]=per_op(t_kar,ops);
+		}
+		auto weight=[](std::size_t n)->std::uint64_t{
+			return (n>=512u)?4u:(n>=224u)?3u:2u;
+		};
+		auto th_cost=[&](std::size_t threshold)->std::uint64_t{
+			std::uint64_t cost=0;
+			for(std::size_t i=0;i<kKarCand.size();++i){
+				const std::uint64_t ns=
+					(kKarCand[i]>=threshold)?kar_ns[i]:school_ns[i];
+				cost+=ns*weight(kKarCand[i]);
+			}
+			return cost;
+		};
+		std::size_t best_th=tuned.kar_th;
+		std::uint64_t best_cost=std::numeric_limits<std::uint64_t>::max();
+		for(std::size_t threshold : kKarCand){
+			const std::uint64_t cost=th_cost(threshold);
+			if(cost<best_cost){
+				best_cost=cost;
+				best_th=threshold;
+			}
+		}
+		tuned.kar_th=best_th;
+		at_state().kar_th=best_th;
 	}
 
 	{
@@ -7910,10 +8394,12 @@ inline void at_impl(){
 	{
 		std::uint64_t seed=0xd1b54a32d192ed03ULL;
 		std::vector<std::pair<BigInt,BigInt>> samples;
-		constexpr std::array<std::size_t,5> kSizes={16u,24u,40u,64u,96u};
+		constexpr std::array<std::size_t,8> kSizes={
+			16u,24u,40u,64u,96u,160u,256u,512u};
 		samples.reserve(kSizes.size()*2);
 		for(std::size_t limbs : kSizes){
-			for(int i=0;i<2;++i){
+			const int count=(limbs>=160u)?1:2;
+			for(int i=0;i<count;++i){
 				BigInt a=mk_bench(seed,limbs);
 				BigInt b=mk_bench(seed,limbs);
 				if(a==b)
@@ -7947,8 +8433,10 @@ inline void at_impl(){
 		at_state().hl_min=best_min;
 		at_state().hl_rnd=best_rnd;
 
-		constexpr std::array<std::size_t,4> kGcdSmCand={32u,48u,64u,96u};
-		constexpr std::array<std::size_t,4> kGcdLgCand={4u,8u,12u,16u};
+		constexpr std::array<std::size_t,6> kGcdSmCand={
+			32u,64u,96u,128u,192u,256u};
+		constexpr std::array<std::size_t,8> kGcdLgCand={
+			4u,8u,16u,32u,64u,96u,128u,192u};
 		best_t=std::numeric_limits<std::uint64_t>::max();
 		std::size_t best_sm=tuned.gcd_sm;
 		std::size_t best_lg=tuned.gcd_lg;
@@ -8226,20 +8714,32 @@ inline void at_impl(){
 	at_state()=tuned;
 }
 
-inline void ensure_at(){
+inline void ensure_at_level(unsigned need){
 #if MINI_MP_ENABLE_AUTOTUNE
-	if(at_done().load(std::memory_order_acquire))
+	if(need==0u)
+		return;
+	if(at_done().load(std::memory_order_acquire)>=need)
 		return;
 	if(at_busy())
 		return;
-	static std::once_flag once;
-	std::call_once(once,[](){
-		at_busy()=true;
-		at_impl();
-		at_busy()=false;
-		at_done().store(true,std::memory_order_release);
-	});
+	static std::mutex mtx;
+	std::lock_guard<std::mutex> lock(mtx);
+	if(at_done().load(std::memory_order_acquire)>=need)
+		return;
+	at_busy()=true;
+	if(need>=2u)
+		at_impl_full();
+	else
+		at_impl_fast();
+	at_busy()=false;
+	at_done().store(need,std::memory_order_release);
+#else
+	(void)need;
 #endif
+}
+
+inline void ensure_at(){
+	ensure_at_level(at_default_level());
 }
 
 inline std::size_t tun_ntt() noexcept{
@@ -8256,6 +8756,10 @@ inline std::size_t tun_ntt_bits() noexcept{
 
 inline std::size_t tun_krec() noexcept{
 	return at_state().kar_rec;
+}
+
+inline std::size_t tun_srec() noexcept{
+	return at_state().sqr_rec;
 }
 
 inline std::size_t tun_kar() noexcept{
@@ -8331,6 +8835,14 @@ inline std::size_t tun_t3() noexcept{
 }
 
 } 
+
+inline void autotune_fast(){
+	detail::ensure_at_level(1u);
+}
+
+inline void autotune_full(){
+	detail::ensure_at_level(2u);
+}
 
 
 
