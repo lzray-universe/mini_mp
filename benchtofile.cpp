@@ -45,6 +45,7 @@ int main(int argc,char**argv){
 	out<<"\ts.hl_rnd="<<s.hl_rnd<<"u;\n";
 	out<<"\ts.gcd_sm="<<s.gcd_sm<<"u;\n";
 	out<<"\ts.gcd_lg="<<s.gcd_lg<<"u;\n";
+	out<<"\ts.gcd_qs="<<s.gcd_qs<<"u;\n";
 	out<<"\ts.bz_min="<<s.bz_min<<"u;\n";
 	out<<"\ts.bz_chunk="<<s.bz_chunk<<"u;\n";
 	out<<"\ts.prod_leaf="<<s.prod_leaf<<"u;\n";
@@ -82,5 +83,6 @@ int main(int argc,char**argv){
 	std::cout<<"kar_dif "<<s.kar_dif<<"\n";
 	std::cout<<"gcd_sm "<<s.gcd_sm<<"\n";
 	std::cout<<"gcd_lg "<<s.gcd_lg<<"\n";
+	std::cout<<"gcd_qs "<<s.gcd_qs<<"\n";
 	return 0;
 }

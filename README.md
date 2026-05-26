@@ -176,6 +176,258 @@ int main(){
 `BigRat` supports `+`, `-`, `*`, `/`, comparisons, parsing from integer,
 decimal, and `num/den` forms, and normalized output with `to_string(base)`.
 
+## BigFloat Usage
+
+`BigFloat` is a binary multiple-precision floating-point type with explicit
+precision and selectable rounding. Finite values are stored as a sign, an
+integer mantissa, and a binary exponent. The current implementation covers the
+common core: construction, decimal and binary parsing, `+`, `-`, `*`, `/`,
+single-rounding fused multiply-add, integer powers, roots, reciprocal, square,
+square root, comparisons, integer conversion, precision changes, remainders,
+min/max, adjacent values, exponent split helpers, and basic integer rounding
+helpers.
+
+```cpp
+#include "mini_mp.hpp"
+#include <iostream>
+
+int main(){
+	using mini_mp::BigFloat;
+	using mini_mp::FloatRnd;
+
+	BigFloat a("1.5",128);
+	BigFloat b("2.25",128);
+	BigFloat c=BigFloat::div(a*b,b,128,FloatRnd::nearest);
+	BigFloat r=mini_mp::sqrt(BigFloat("2",192),192);
+
+	std::cout<<c.to_string(2)<<"\n";
+	std::cout<<r.to_string(10,50)<<"\n";
+}
+```
+
+Construction and parsing:
+
+```cpp
+mini_mp::BigFloat z;
+mini_mp::BigFloat a(123,128);
+mini_mp::BigFloat b(mini_mp::BigInt::parse("12345678901234567890"),256);
+mini_mp::BigFloat c(mini_mp::BigRat::parse("355/113"),256);
+mini_mp::BigFloat d("3.1415926535",256);
+mini_mp::BigFloat e("0b1.001p5",128);
+auto f=mini_mp::BigFloat::from_parts(1,mini_mp::BigInt(31),-4,64);
+```
+
+Rounding modes:
+
+```cpp
+mini_mp::FloatRnd::nearest;
+mini_mp::FloatRnd::zero;
+mini_mp::FloatRnd::down;
+mini_mp::FloatRnd::up;
+mini_mp::FloatRnd::away;
+```
+
+Floating-point operations:
+
+```cpp
+auto s=a+b;
+auto t=a-b;
+auto u=a*b;
+auto v=a/b;
+auto q=mini_mp::BigFloat::div(a,b,256,mini_mp::FloatRnd::nearest);
+auto y=mini_mp::fma(a,b,c,256);
+auto sq=mini_mp::sqr(a,256);
+auto rt=mini_mp::sqrt(a,256);
+auto cb=mini_mp::cbrt(a,256);
+auto rn=mini_mp::rootn(a,5,256);
+auto pw=mini_mp::pow_ui(a,12,256);
+auto ipw=mini_mp::pow_si(a,-3,256);
+auto iv=mini_mp::recip(a,256);
+auto sh=mini_mp::ldexp(a,100);
+auto sc=mini_mp::scalbn(a,-8);
+auto hm=mini_mp::hypot(a,b,256);
+auto fm=mini_mp::fmod(a,b,256);
+auto rm=mini_mp::remainder(a,b,256);
+auto ep=mini_mp::epsilon(256);
+auto ul=mini_mp::ulp(a);
+```
+
+State and conversion helpers:
+
+```cpp
+a.is_finite();
+a.is_inf();
+a.is_nan();
+a.is_zero();
+a.is_integer();
+a.precision();
+a.exponent();
+a.inexact();
+a.set_precision(256);
+auto cs=mini_mp::copy_sign(a,b);
+auto ss=mini_mp::set_sign(a,-1);
+auto ri=a.rint(mini_mp::FloatRnd::nearest);
+auto fr=a.frac(256);
+auto parts=mini_mp::modf(a,256);
+auto dn=mini_mp::dim(a,b,256);
+auto mn=mini_mp::min(a,b,256);
+auto mx=mini_mp::max(a,b,256);
+int ac=mini_mp::cmpabs(a,b);
+auto fx=mini_mp::frexp(a,256);
+auto eb=mini_mp::ilogb(a);
+auto nu=mini_mp::next_up(a);
+auto nd=mini_mp::next_down(a);
+auto nt=mini_mp::next_toward(a,b);
+bool fu=a.fits_u64();
+bool fi=a.fits_i64();
+std::uint64_t u=a.to_u64();
+std::int64_t i=a.to_i64();
+std::string bin=a.to_string(2);
+std::string dec=a.to_string(10,80);
+mini_mp::BigInt n=a.to_bigint(mini_mp::FloatRnd::zero);
+mini_mp::BigRat exact=a.to_bigrat();
+```
+
+`inexact()` returns zero for an exact result. A positive value means the stored
+value is above the exact value, and a negative value means it is below it.
+The adjacent-value helpers use the current precision and an unbounded exponent
+model; infinities remain infinities because there is no configured maximum
+finite exponent.
+
+## BigComplex Usage
+
+`BigComplex` stores real and imaginary parts as `BigFloat` values. It supports
+arithmetic, elementary functions, rounding to a target precision, and helpers
+for polar form.
+
+```cpp
+#include "mini_mp.hpp"
+#include <iostream>
+
+int main(){
+	using mini_mp::BigComplex;
+	using mini_mp::BigFloat;
+
+	BigComplex z(BigFloat("1.25",160),BigFloat("0.5",160));
+	BigComplex w=mini_mp::exp(z,160)+mini_mp::sin(z,160);
+	BigComplex p=mini_mp::polar(BigFloat(2,160),BigFloat("0.75",160),160);
+
+	std::cout<<w.real().to_string(10,40)<<"\n";
+	std::cout<<p.imag().to_string(10,40)<<"\n";
+}
+```
+
+Common helpers:
+
+```cpp
+auto z=mini_mp::BigComplex(mini_mp::BigFloat(1,128),
+						   mini_mp::BigFloat(2,128));
+auto c=mini_mp::conj(z);
+auto n=mini_mp::norm(z,128);
+auto r=mini_mp::abs(z,128);
+auto a=mini_mp::arg(z,128);
+auto e=mini_mp::exp(z,128);
+auto l=mini_mp::log(z,128);
+auto s=mini_mp::sqrt(z,128);
+auto p=mini_mp::pow_si(z,5,128);
+```
+
+## BigNT Usage
+
+The `mini_mp::BigNT` namespace contains number-theory and polynomial utilities
+built on top of `BigInt`.
+
+```cpp
+#include "mini_mp.hpp"
+
+int main(){
+	using mini_mp::BigInt;
+	using namespace mini_mp::BigNT;
+
+	BigInt n=BigInt::parse("8051");
+	auto f=factor(n);
+	BigInt d=pollard_rho(n);
+	auto c=cornacchia(BigInt(1),BigInt(65));
+	std::size_t h=class_number(BigInt(-23));
+
+	ModPoly a({1,2,3},17);
+	ModPoly b({3,4},17);
+	ModPoly prod=ModPoly::mul(a,b);
+	ModPoly g=ModPoly::gcd(prod,a);
+
+	(void)f;
+	(void)d;
+	(void)c;
+	(void)h;
+	(void)g;
+}
+```
+
+Useful entry points:
+
+```cpp
+mini_mp::BigNT::mod_pos(a,m);
+mini_mp::BigNT::abs_sub(a,b);
+mini_mp::BigNT::pollard_rho(n);
+mini_mp::BigNT::pollard_pm1(n,10000);
+mini_mp::BigNT::factor(n);
+mini_mp::BigNT::cornacchia(d,m);
+mini_mp::BigNT::reduced_forms(D);
+mini_mp::BigNT::class_number(D);
+mini_mp::BigNT::j_qexp(8);
+mini_mp::BigNT::j_invariant_tau(tau,8,256);
+```
+
+`ModPoly` uses `std::uint64_t` coefficients modulo a small modulus, and
+`BigIntPoly` supports the same style of operations with a `BigInt` modulus.
+
+## Elliptic Curve Usage
+
+The `mini_mp::ec` namespace provides basic affine and Jacobian arithmetic over
+prime fields. It is intended as a compact arithmetic building block, not as a
+complete protocol layer.
+
+```cpp
+#include "mini_mp.hpp"
+
+int main(){
+	using mini_mp::BigInt;
+	using namespace mini_mp::ec;
+
+	Curve E{BigInt(17),BigInt(2),BigInt(2)};
+	AffinePoint G=affine(BigInt(5),BigInt(1),E);
+	AffinePoint P=mul(G,BigInt(7),E);
+	JacobianPoint J=mul(to_jacobian(G),BigInt(7),E);
+
+	bool ok=is_on_curve(P,E)&&to_affine(J,E).x==P.x;
+	(void)ok;
+}
+```
+
+## Testing
+
+Build and run the standalone coverage test:
+
+```text
+g++ -O2 -std=c++20 -DNDEBUG -DMINI_MP_ENABLE_SIMD=0 -DMINI_MP_ENABLE_NTT=0 test.cpp -o test
+./test --quick
+```
+
+Full local run:
+
+```text
+./test --cases 10000
+```
+
+Useful modes:
+
+```text
+./test --quick           shorter randomized coverage and timing
+./test --no-bench        functional checks only
+./test --bench-only      timing only
+./test --seed 12345      deterministic randomized run
+```
+
 ## benchtofile
 
 `benchtofile.cpp` runs full tuning, then writes a standalone starter source
